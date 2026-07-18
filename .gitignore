@@ -1,0 +1,29 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+ 
+# Secrets — never commit these
+credentials.json
+token.json
+.env
+ 
+# Large local data — not part of source
+lfw_images/
+data/
+tests/fixtures/
+ 
+# Docker
+# (docker-compose.yml and Dockerfile ARE tracked, this just excludes runtime volumes if any appear locally)
+ 
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+ 
+# Logs
+*.log
+ 

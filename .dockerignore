@@ -1,0 +1,23 @@
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+ 
+# Secrets — never bake into image
+credentials.json
+token.json
+ 
+# Large local data, not needed in image
+lfw_images/
+data/
+tests/fixtures/
+ 
+# Version control
+.git
+.gitignore
+ 
+# Editor/OS files
+.vscode
+.idea
+.DS_Store
+ 

@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  db:
+    image: ankane/pgvector:latest
+    container_name: photo_platform_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: photo_platform
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: photo_platform_api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/photo_platform
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_DIR: /data/photos
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/app
+      - photo_data:/data/photos
+
+volumes:
+  pgdata:
+  photo_data:
