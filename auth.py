@@ -3,7 +3,10 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 import os
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/photospicker.mediaitems.readonly",
+]
 
 def get_drive_credentials():
     creds = None

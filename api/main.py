@@ -13,6 +13,14 @@ from pipeline.ingest import ingest_photo
 from pipeline.search import search_photos as search_photos_fn
 from pipeline.faces import detect_faces
 from pipeline.categorize import categorize_image
+from auth import get_drive_credentials
+from sources.google_photos_picker import (
+    create_picker_session,
+    poll_session_until_ready,
+    list_picked_media_items,
+    download_picked_item,
+    delete_session,
+)
 from storage.local_backend import LocalStorageBackend
 
 app = FastAPI(title="AI Photo Management Platform")
@@ -207,3 +215,47 @@ def run_categorize(photo_id: str, db: Session = Depends(get_db)):
 def get_categories(photo_id: str, db: Session = Depends(get_db)):
     categories = db.query(Category).filter(Category.photo_id == photo_id).all()
     return [{"category": c.category, "confidence": c.confidence} for c in categories]
+
+
+@app.post("/google-photos/session")
+def create_google_photos_session():
+    """Creates a Google Photos picker session.
+
+    Returns a pickerUri the user must open in a browser to select photos.
+    Session ID must be passed to /google-photos/session/{id}/import afterward.
+    """
+    creds = get_drive_credentials()
+    session = create_picker_session(creds)
+    return {
+        "session_id": session["id"],
+        "picker_uri": session["pickerUri"],
+        "message": "Open picker_uri in a browser, select photos, then call the import endpoint with this session_id"
+    }
+
+
+@app.post("/google-photos/session/{session_id}/import")
+def import_google_photos_session(session_id: str, background_tasks: BackgroundTasks):
+    """Waits for the user to finish picking, then downloads and ingests every selected photo.
+
+    This blocks until the user finishes picking (or times out after 5 minutes),
+    then queues ingestion of each photo as a background task.
+    """
+    creds = get_drive_credentials()
+
+    session = poll_session_until_ready(creds, session_id)
+    media_items = list_picked_media_items(creds, session_id)
+
+    queued = []
+    for item in media_items:
+        local_path = download_picked_item(creds, item)
+        filename = item["mediaFile"].get("filename", f"{item['id']}.jpg")
+        background_tasks.add_task(ingest_photo, local_path, filename)
+        queued.append(filename)
+
+    delete_session(creds, session_id)
+
+    return {
+        "status": "queued",
+        "photos_picked": len(media_items),
+        "filenames": queued
+    }

@@ -54,3 +54,5 @@ ruff
 isort
 mypy
 pre-commit
+
+requests==2.32.3
