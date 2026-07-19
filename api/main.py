@@ -1,11 +1,18 @@
-from fastapi import FastAPI, Depends, HTTPException
+import os
+import shutil
+import tempfile
+
+import numpy as np
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from db.database import get_db, engine, Base
-from db.models import Photo
+from db.models import Photo, Duplicate, FaceCluster, Face, Category
 from pipeline.ingest import ingest_photo
 from pipeline.search import search_photos as search_photos_fn
+from pipeline.faces import detect_faces
+from pipeline.categorize import categorize_image
 from storage.local_backend import LocalStorageBackend
 
 app = FastAPI(title="AI Photo Management Platform")
@@ -17,10 +24,6 @@ Base.metadata.create_all(bind=engine)
 def health_check():
     return {"status": "ok"}
 
-
-from fastapi import UploadFile, File
-import shutil
-import tempfile
 
 @app.post("/ingest")
 def ingest(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
@@ -51,6 +54,18 @@ def get_photo(photo_id: str, db: Session = Depends(get_db)):
     }
 
 
+@app.get("/photos/{photo_id}/image")
+def get_photo_image(photo_id: str, db: Session = Depends(get_db)):
+    photo = db.query(Photo).filter(Photo.id == photo_id).first()
+    if not photo:
+        raise HTTPException(status_code=404, detail="Photo not found")
+    if photo.storage_backend != "local":
+        raise HTTPException(status_code=400, detail="Only local storage supported for direct serving")
+    if not os.path.exists(photo.storage_ref):
+        raise HTTPException(status_code=404, detail="Image file not found on disk")
+    return FileResponse(photo.storage_ref)
+
+
 @app.delete("/photos/{photo_id}")
 def delete_photo(photo_id: str, db: Session = Depends(get_db)):
     photo = db.query(Photo).filter(Photo.id == photo_id).first()
@@ -71,14 +86,6 @@ def search(q: str, top_k: int = 5):
     return {"query": q, "results": results}
 
 
-# Add these imports to api/main.py
-from db.models import Duplicate, FaceCluster, Face, Category
-from pipeline.dedup import find_clip_duplicates
-from pipeline.faces import detect_faces, cluster_faces
-from pipeline.categorize import categorize_image
-import numpy as np
-
-
 @app.post("/dedup")
 def run_dedup(db: Session = Depends(get_db)):
     photos = db.query(Photo).filter(Photo.embedding.isnot(None)).all()
@@ -88,7 +95,7 @@ def run_dedup(db: Session = Depends(get_db)):
         similar = (
             db.query(Photo)
             .filter(Photo.id != photo.id)
-            .filter(Photo.embedding.cosine_distance(photo.embedding) < 0.05)  # distance < 0.05 = similarity > 0.95
+            .filter(Photo.embedding.cosine_distance(photo.embedding) < 0.05)
             .limit(5)
             .all()
         )
@@ -104,6 +111,24 @@ def run_dedup(db: Session = Depends(get_db)):
 
     db.commit()
     return {"duplicates_found": len(saved), "duplicates": saved}
+
+
+@app.get("/duplicates")
+def list_duplicates(db: Session = Depends(get_db), limit: int = 50):
+    duplicates = db.query(Duplicate).limit(limit).all()
+    results = []
+    for d in duplicates:
+        photo = db.query(Photo).filter(Photo.id == d.photo_id).first()
+        dup_of = db.query(Photo).filter(Photo.id == d.duplicate_of_id).first()
+        results.append({
+            "photo_id": d.photo_id,
+            "photo_image_url": f"/photos/{d.photo_id}/image",
+            "duplicate_of_id": d.duplicate_of_id,
+            "duplicate_of_image_url": f"/photos/{d.duplicate_of_id}/image",
+            "similarity_score": d.similarity_score,
+        })
+    return {"count": len(results), "duplicates": results}
+
 
 @app.post("/faces/cluster")
 def run_face_clustering(db: Session = Depends(get_db)):
@@ -144,6 +169,23 @@ def run_face_clustering(db: Session = Depends(get_db)):
 
     db.commit()
     return {"faces_found": faces_found, "photos_processed": len(unprocessed_photos)}
+
+
+@app.get("/faces/clusters")
+def list_face_clusters(db: Session = Depends(get_db)):
+    clusters = db.query(FaceCluster).all()
+    results = []
+    for cluster in clusters:
+        faces = db.query(Face).filter(Face.cluster_id == cluster.id).all()
+        results.append({
+            "cluster_id": cluster.id,
+            "label": cluster.label,
+            "face_count": len(faces),
+            "photo_image_urls": [f"/photos/{f.photo_id}/image" for f in faces],
+        })
+    results.sort(key=lambda c: c["face_count"], reverse=True)
+    return {"cluster_count": len(results), "clusters": results}
+
 
 @app.post("/photos/{photo_id}/categorize")
 def run_categorize(photo_id: str, db: Session = Depends(get_db)):
