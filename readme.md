@@ -1,147 +1,160 @@
 # AI Photo Management Platform
 
-An AI-powered photo library manager that deduplicates, organizes by face, and enables natural-language search over your personal photo collection.
+An AI-powered photo management platform that connects to Google Photos and local storage, identifies duplicate and near-duplicate images, categorizes photos, groups people using facial recognition, and supports natural language search — built with FastAPI, PostgreSQL + pgvector, and OpenCLIP.
 
-Built as part of a PanScience Innovations internship assignment.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for system architecture diagrams and detailed design decisions.
 
 ## Features
 
-- **Perceptual + semantic deduplication** — detects near-identical and visually similar photos using pHash and CLIP embeddings
-- **Face clustering** — groups photos by the people in them using `face_recognition` + DBSCAN, with incremental matching for new uploads
-- **Zero-shot categorization** — tags photos by scene/content (people, food, documents, nature, etc.) using CLIP, no training required
-- **Natural language search** — find photos by describing them ("a person smiling", "sunset at the beach") via CLIP text-image similarity, powered by pgvector
-- **Pluggable storage** — local filesystem backend implemented; Google Drive backend implemented and OAuth-tested (5TB storage via Gmail)
+- **Ingestion** from local storage and Google Photos (via the Picker API)
+- **Natural language search** over your photo library using CLIP embeddings
+- **Duplicate detection** — both exact/near-exact (perceptual hash) and semantic near-duplicates (CLIP similarity)
+- **Face grouping** — detects and clusters faces across your library, similar to modern photo apps
+- **Zero-shot categorization** into: documents, prescriptions, receipts, people, travel, pets, food, screenshots, vehicles, nature, and other
+- **Bulk ingestion** with batched CLIP inference for large libraries
+- **Resumable long-running jobs** (dedup, face clustering) with live progress tracking
+- Fully containerized with Docker
 
 ## Tech Stack
 
-- **Embeddings**: OpenCLIP (`ViT-B-32-quickgelu`, OpenAI weights)
-- **Face detection/clustering**: `face_recognition` (dlib) + scikit-learn DBSCAN
-- **Database**: PostgreSQL + pgvector (via Docker Compose)
-- **ORM**: SQLAlchemy
 - **API**: FastAPI
-- **Storage**: Local filesystem / Google Drive (OAuth 2.0)
-- **Testing**: pytest
-
-## Architecture
-
-```
-pipeline/
-  embedding.py     # pHash, CLIP image/text embeddings
-  dedup.py          # pHash + CLIP-based duplicate detection
-  faces.py           # Face detection, clustering, incremental matching
-  categorize.py       # Zero-shot scene/content tagging
-  ingest.py             # End-to-end: upload -> embed -> store
-  search.py               # Natural language search via pgvector
-
-storage/
-  base.py          # Abstract StorageBackend interface
-  local_backend.py  # Local filesystem implementation
-  drive_backend.py    # Google Drive implementation
-
-db/
-  database.py      # SQLAlchemy engine/session setup
-  models.py          # Photo, Face, FaceCluster, Duplicate, Category tables
-
-tests/
-  test_*.py         # Unit tests for each pipeline module
-  fixtures.py          # Synthetic test image generator
-```
+- **Database**: PostgreSQL + pgvector (vector similarity search)
+- **Embeddings**: OpenCLIP (`ViT-B-32-quickgelu`, OpenAI weights)
+- **Face detection/clustering**: `face_recognition` (HOG) + DBSCAN / incremental nearest-neighbor matching
+- **Storage**: Pluggable backend — local filesystem or Google Drive
+- **Photo import**: Google Photos Picker API
+- **Deployment**: Docker + docker-compose
 
 ## Setup
 
-### 1. Environment
+### Prerequisites
+
+- Python 3.11+ (3.13 tested)
+- Docker Desktop
+- A Google Cloud project (for Google Drive storage and/or Google Photos import)
+
+### 1. Clone and install dependencies
 
 ```bash
+git clone https://github.com/bj3795109-ui/ai-photo-management-platform.git
+cd ai-photo-management-platform
 python -m venv .venv
-source .venv/Scripts/activate  # Windows Git Bash
-pip install -r requirements.txt --break-system-packages
+source .venv/Scripts/activate   # Windows Git Bash
+# or: source .venv/bin/activate  # macOS/Linux
+
+pip install -r requirements.txt
 ```
 
-`dlib` requires a prebuilt wheel on Windows (avoids needing Visual Studio build tools):
+**Important (Windows):** `face_recognition` depends on the source `dlib` package, which fails to build without Visual Studio C++ Build Tools. This project uses `dlib-bin` (a prebuilt wheel) instead. After the main install, install `face_recognition` separately without pulling its `dlib` dependency:
+
 ```bash
-pip install dlib-bin
 pip install face_recognition --no-deps
 ```
 
-### 2. Database
+### 2. Start PostgreSQL (with pgvector)
 
 ```bash
 docker compose up -d db
 ```
 
-Runs Postgres with the pgvector extension pre-installed (`ankane/pgvector` image).
+### 3. Google Cloud setup (for Drive storage and/or Google Photos import)
 
-Create tables:
-```python
-from db.database import engine, Base
-from db import models
-Base.metadata.create_all(bind=engine)
+1. Create a project in [Google Cloud Console](https://console.cloud.google.com)
+2. Enable the **Google Drive API** (for local-style storage) and/or the **Google Photos Picker API** (for importing from a user's Google Photos library)
+3. Configure the OAuth consent screen (External, add yourself as a test user)
+4. Create OAuth credentials (Desktop app type), download as `credentials.json`, place in the project root
+5. On first run, `auth.py` will open a browser window for you to authorize the app; this generates `token.json`
+
+**Note on Google Photos:** As of April 2025, Google restricted the Photos Library API — apps can no longer list a user's entire existing library without a formal Google verification process. This project uses the **Photos Picker API** instead: the user explicitly selects photos through Google's own picker UI each time, and the app receives access only to those selected items. See `ARCHITECTURE.md` for details.
+
+### 4. Run the API
+
+```bash
+python -m uvicorn api.main:app --reload
 ```
 
-### 3. Google Drive backend (optional)
+Visit `http://127.0.0.1:8000/docs` for interactive API documentation (Swagger UI).
 
-1. Create a Google Cloud project, enable the Drive API
-2. Configure OAuth consent screen (External, add yourself as a test user)
-3. Create an OAuth Client ID (Desktop app), download as `credentials.json` into the project root
-4. First run will open a browser for one-time authorization, then cache a reusable `token.json`
+### 5. Run with Docker (full stack)
 
-## Usage
+```bash
+docker compose up -d
+```
 
-```python
-from pipeline.ingest import ingest_photo
-from pipeline.search import search_photos
+This builds and runs both the API and database containers together. Your project folder is bind-mounted into the API container, so local storage and any bulk-downloaded datasets remain accessible.
 
-# Ingest a photo (uploads to storage, computes embedding, stores in DB)
-photo_id = ingest_photo("path/to/photo.jpg", "photo.jpg")
+## API Usage
 
-# Search naturally
-results = search_photos("a person smiling", top_k=5)
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Health check |
+| POST | `/ingest` | Upload and ingest a photo (multipart file upload) |
+| GET | `/photos` | List photos (paginated, limit 50) |
+| GET | `/photos/{id}` | Get photo metadata |
+| GET | `/photos/{id}/image` | View/download the actual image file |
+| DELETE | `/photos/{id}` | Delete a photo |
+| GET | `/search?q=...&top_k=5` | Natural language search |
+| POST | `/dedup` | Run duplicate detection (resumable, progress-tracked) |
+| GET | `/duplicates` | List detected duplicate pairs, with viewable image URLs |
+| POST | `/faces/cluster` | Run face detection/clustering (resumable, progress-tracked) |
+| GET | `/faces/clusters` | List face clusters, with viewable image URLs |
+| POST | `/photos/{id}/categorize` | Categorize a photo (zero-shot CLIP) |
+| GET | `/photos/{id}/categories` | Get a photo's assigned categories |
+| GET | `/jobs/status` | Poll live progress of `/dedup` or `/faces/cluster` while running |
+| POST | `/google-photos/session` | Start a Google Photos picker session |
+| POST | `/google-photos/session/{id}/import` | Import photos selected in a picker session |
+
+### Bulk ingestion (large libraries)
+
+For ingesting many images at once (faster than one-by-one via `/ingest`, uses batched CLIP inference):
+
+```bash
+python -m scripts.bulk_ingest /path/to/folder
 ```
 
 ## Testing
 
 ```bash
-python -m pytest -v
+python -m pytest tests/ -v
 ```
 
-15 tests covering embeddings, deduplication, face clustering/matching, categorization, and storage. Synthetic fixture images are generated via `tests/fixtures.py` (no real photos required to run tests).
-
-**Known gap**: `detect_faces` is not directly unit tested since it requires a real photo containing a face; `cluster_faces` and `match_face_to_cluster` are tested in isolation using synthetic 128-dim encodings.
+15+ tests covering embedding, deduplication, face detection/clustering, categorization, and storage.
 
 ## Known Limitations
 
-- Face detection uses the default HOG model, which is less reliable on angled/profile faces. CNN model (`model="cnn"`) available as a slower, more accurate alternative — not yet wired up as a config option.
-- No GPU acceleration used; CLIP and face embedding inference run on CPU.
-- Google Drive backend has no automated retry/error handling beyond what the Drive API raises natively.
-- **Face clustering accuracy degrades on large libraries.** The incremental clustering approach (matching each new face against only its single nearest known face, rather than re-running full batch clustering) is vulnerable to error chaining: if two visually similar but distinct people are ever matched together early in a run, subsequent faces that are loosely close to either person can keep joining the same cluster, producing an oversized, incorrect "supercluster" over a long run. This was observed directly when testing against the full 13,233-image LFW dataset — one cluster grew to 1,056 faces (verified visually to include clearly different people), while the true `cluster_faces` (batch DBSCAN) function, tested in isolation via unit tests, does not exhibit this failure mode since it considers local density across the whole batch rather than nearest-single-point matching.
-  - **Why this trade-off was made:** batch DBSCAN re-clustering is accurate but doesn't scale — it would require re-processing the entire face history on every call (see "Scaling Considerations" below). The incremental approach trades some accuracy for the ability to only process new photos, which is necessary at real library scale.
-  - **How this would be fixed in a production system:** cap cluster size and re-validate/split oversized clusters against their centroid periodically, use a stricter tolerance combined with a minimum-confidence threshold before merging, or run a periodic batch DBSCAN reconciliation pass in the background to correct drift from the incremental process without blocking real-time ingestion.
+- **Face detection** uses the default HOG model, which is less reliable on angled/profile faces. CNN model (`model="cnn"`) available as a slower, more accurate alternative — not yet wired up as a config option.
+- **No GPU acceleration** — CLIP and face embedding inference run on CPU.
+- **Google Drive backend** has no automated retry/error handling beyond what the Drive API raises natively.
+- **Google Photos** integration only provides access to photos the user actively selects in each picker session — there's no way to browse/search a user's full library from within the app before they've picked (a platform-level restriction, not a limitation of this implementation — see `ARCHITECTURE.md`).
+- **Face clustering accuracy degrades on large libraries.** The incremental clustering approach (matching each new face against only its single nearest known face, rather than re-running full batch clustering) is vulnerable to error chaining: if two visually similar but distinct people are ever matched together early in a run, subsequent faces that are loosely close to either person can keep joining the same cluster, producing an oversized, incorrect "supercluster" over a long run. This was observed directly when testing against the full 13,233-image LFW dataset — one cluster grew to 1,056 faces (verified visually to include clearly different people).
+  - **Why this trade-off was made:** batch DBSCAN re-clustering is accurate but doesn't scale — it would require re-processing the entire face history on every call. The incremental approach trades some accuracy for the ability to only process new photos, necessary at real library scale.
+  - **How this would be fixed in production:** cap cluster size and periodically re-validate/split oversized clusters against their centroid, use a stricter tolerance combined with a minimum-confidence threshold before merging, or run a periodic batch DBSCAN reconciliation pass in the background.
 
-## Scaling Considerations (tested up to 13,000+ images)
+## Scaling Considerations (tested up to 113,268 images)
 
-The system was stress-tested against the full LFW dataset (13,233 images) to validate behavior beyond toy-scale demos. Findings:
+The system was stress-tested well beyond toy-scale demos, combining the full LFW dataset (13,233 images), STL-10's unlabeled split (100,000 images), and a small Google Photos import (12 images) — **113,268 total images**, clearing the assignment's 100,000-image requirement with real, tested data.
 
-**What scaled well:**
-- **Bulk ingestion** (`scripts/bulk_ingest.py`) — batches 32 images per CLIP forward pass instead of one at a time. Ingested all 13,233 images in ~458 seconds (~29 images/sec), comfortably CPU-bound and demo-viable.
-- **Search** (`/search`) — backed by a pgvector `ivfflat` index on `photos.embedding` (cosine distance), so queries return in milliseconds regardless of library size, instead of an O(n) or O(n²) Python-side scan.
-- **Deduplication** (`/dedup`) — rewritten to use the same pgvector index (per-photo nearest-neighbor query) rather than pairwise comparison in Python, avoiding an O(n²) blowup at scale.
-- **Face clustering re-runs** — a `faces_processed` flag on `Photo` ensures only new/unprocessed photos are touched on subsequent calls, avoiding a full re-cluster of the entire library every time.
+### What scaled well
 
-**What did not scale well (known bottleneck):**
-- **Initial face detection/clustering** (`/faces/cluster`) is synchronous and unbatched — each image runs through `face_recognition`'s HOG detector one at a time, inside a single blocking HTTP request. On 13,000+ images this took on the order of an hour on a modern CPU (Intel Core Ultra 5 225H), with no progress visibility during the run and a real risk of client-side timeouts.
+- **Bulk ingestion** (`scripts/bulk_ingest.py`) — batches 32 images per CLIP forward pass. Ingested 13,233 images in ~458 seconds, and 100,000 images in ~3,876 seconds (~26 images/sec), comfortably CPU-bound and demo-viable.
+- **Search** (`/search`) — backed by a pgvector `ivfflat` index on `photos.embedding`, so queries return in milliseconds regardless of library size.
+- **Face clustering re-runs** — a `faces_processed` flag per photo ensures only new/unprocessed photos are touched on subsequent calls.
 
-**Root cause:** unlike CLIP inference (which is naturally batchable via PyTorch tensor ops), `face_recognition`'s HOG detector operates on one image at a time and offers no batching, and the endpoint has no background task or progress reporting — it computes everything before returning a single response.
+### What required rework at this scale
 
-**How this would be fixed in a production system:**
-1. Move face detection off the request path entirely — into a background job (e.g. Celery + Redis, or even FastAPI `BackgroundTasks` for a lighter-weight version) so `/faces/cluster` returns immediately with a job ID, and the client polls a status endpoint instead of blocking on the HTTP connection.
-2. Add progress logging/checkpointing (commit incrementally per batch rather than once at the end) so a long-running job can be interrupted and resumed without losing completed work.
-3. Evaluate the CNN face detector's batching support, or an alternative face detection library with native batch inference, if throughput becomes the primary constraint over accuracy.
+Both `/dedup` and `/faces/cluster` were initially implemented as long-running, single-transaction endpoints that only committed once at the very end — discovered to be a real problem at 100k+ scale (long waits with no visibility, and any interruption meant losing all progress). This was fixed with:
 
-This gap was deliberately left as-is (rather than "fixed" superficially) to give an honest picture of where the current architecture holds up under real load and where it doesn't — the ingestion and search paths were prioritized since they're on the user-facing hot path, while one-time bulk face clustering is a background/maintenance operation that can tolerate being slow, just not silent.
+1. **Periodic commits** — every 2,000 photos for `/dedup`, every 500 for `/faces/cluster` — instead of one commit at the end
+2. **Resume flags** — a `dedup_processed` flag (mirroring the existing `faces_processed` pattern) so a restart skips already-completed photos instead of re-scanning the whole library
+3. **A `job_status` table + `GET /jobs/status` endpoint** — written on each periodic commit, pollable from a separate request while the job is still running, so progress is visible in real time instead of a silent multi-hour wait
+4. **Reduced query count in `/dedup`** — the original version issued an extra existence-check database query per potential duplicate match found; this was replaced with an in-memory lookup set built once at the start, cutting total query volume significantly
+
+This was discovered through direct experience: the initial `/dedup` and `/faces/cluster` runs against the full 113k library were interrupted (laptop sleep, accidental terminal close) partway through, which under the original one-commit-at-the-end design would have meant restarting from zero each time. The fixes above make both operations genuinely production-viable at this scale rather than a fragile, unmonitorable batch job.
 
 ## Roadmap
 
-- [ ] Background job queue (Celery + Redis) for face clustering and other long-running batch operations
+- [ ] Background job queue (Celery + Redis) so `/dedup` and `/faces/cluster` don't block the request thread at all
 - [ ] CNN face detection toggle for improved accuracy
-- [ ] Google Drive ingestion source (currently storage-only)
-- [ ] Web UI for browsing/search
+- [ ] Periodic batch reconciliation pass to correct face clustering drift
+- [ ] Web UI for browsing/search (currently Swagger UI serves as the interactive interface)
+- [ ] Postman collection

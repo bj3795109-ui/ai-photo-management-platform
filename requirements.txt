@@ -2,57 +2,57 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 python-multipart==0.0.9
- 
+
 # Database
 sqlalchemy==2.0.35
 psycopg2-binary==2.9.12
 pgvector==0.3.5
- 
+
 # Validation & Config
 pydantic==2.9.2
 python-dotenv==1.0.1
- 
+
 # Image Processing
 pillow==10.4.0
 imagehash==4.3.2
- 
+
 # AI / ML
 torch
 torchvision
 open-clip-torch
 numpy
 scikit-learn
- 
+
 # Face Recognition
 dlib-bin
 face_recognition
- 
+
 # HTTP
 httpx==0.27.2
- 
+requests==2.32.3
+
 # Testing
 pytest==8.3.3
- 
+
 # Utilities
 tqdm
- 
+
 faiss-cpu
- 
+
 transformers
 huggingface-hub
 safetensors
- 
+
+# Google APIs (Drive storage + Photos Picker)
 google-api-python-client
 google-auth
 google-auth-oauthlib
 google-auth-httplib2
- 
+
 piexif
- 
+
 black
 ruff
 isort
 mypy
 pre-commit
-
-requests==2.32.3

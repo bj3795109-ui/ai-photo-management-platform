@@ -1,6 +1,7 @@
 import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
 
 import numpy as np
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, UploadFile, File
@@ -8,7 +9,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from db.database import get_db, engine, Base
-from db.models import Photo, Duplicate, FaceCluster, Face, Category
+from db.models import Photo, Duplicate, FaceCluster, Face, Category, JobStatus
 from pipeline.ingest import ingest_photo
 from pipeline.search import search_photos as search_photos_fn
 from pipeline.faces import detect_faces
@@ -94,31 +95,94 @@ def search(q: str, top_k: int = 5):
     return {"query": q, "results": results}
 
 
+def _update_job_status(db: Session, job_name: str, processed: int, total: int, status: str, extra_info: str = None):
+    """Upserts a row in job_status. Commits immediately so it's visible to other
+    requests polling GET /jobs/status while this job is still running."""
+    job = db.query(JobStatus).filter(JobStatus.job_name == job_name).first()
+    if job is None:
+        job = JobStatus(job_name=job_name)
+        db.add(job)
+
+    job.processed = processed
+    job.total = total
+    job.status = status
+    job.extra_info = extra_info
+    job.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+
+@app.get("/jobs/status")
+def get_job_status(db: Session = Depends(get_db)):
+    """Poll this while /dedup or /faces/cluster is running to see live progress."""
+    jobs = db.query(JobStatus).all()
+    return {
+        job.job_name: {
+            "status": job.status,
+            "processed": job.processed,
+            "total": job.total,
+            "extra_info": job.extra_info,
+            "updated_at": job.updated_at,
+        }
+        for job in jobs
+    }
+
+
 @app.post("/dedup")
 def run_dedup(db: Session = Depends(get_db)):
-    photos = db.query(Photo).filter(Photo.embedding.isnot(None)).all()
+    """Finds near-duplicate photos using pgvector's index.
 
-    saved = []
-    for photo in photos:
+    Resumable: only processes photos where dedup_processed is False, so if
+    interrupted and restarted, it picks up where it left off instead of
+    re-scanning everything from the start. Commits every 2,000 photos (not
+    just once at the end), and writes progress to job_status (poll
+    GET /jobs/status from a separate request to see it live).
+    """
+    photos = (
+        db.query(Photo.id, Photo.embedding)
+        .filter(Photo.embedding.isnot(None))
+        .filter(Photo.dedup_processed == False)
+        .all()
+    )
+    total = len(photos)
+
+    if total == 0:
+        _update_job_status(db, "dedup", 0, 0, "done", "No new photos to process")
+        return {"message": "No new photos to process", "duplicates_found": 0}
+
+    existing_pairs = set(
+        (d.photo_id, d.duplicate_of_id)
+        for d in db.query(Duplicate.photo_id, Duplicate.duplicate_of_id).all()
+    )
+
+    saved_count = 0
+    _update_job_status(db, "dedup", 0, total, "running", "0 duplicates found so far")
+
+    for i, (photo_id, embedding) in enumerate(photos):
         similar = (
-            db.query(Photo)
-            .filter(Photo.id != photo.id)
-            .filter(Photo.embedding.cosine_distance(photo.embedding) < 0.05)
+            db.query(Photo.id)
+            .filter(Photo.id != photo_id)
+            .filter(Photo.embedding.cosine_distance(embedding) < 0.05)
             .limit(5)
             .all()
         )
-        for match in similar:
-            existing = db.query(Duplicate).filter(
-                Duplicate.photo_id == photo.id,
-                Duplicate.duplicate_of_id == match.id
-            ).first()
-            if not existing:
-                record = Duplicate(photo_id=photo.id, duplicate_of_id=match.id, similarity_score=1.0)
-                db.add(record)
-                saved.append({"photo_id": photo.id, "duplicate_of": match.id})
+        for (match_id,) in similar:
+            pair = (photo_id, match_id)
+            if pair not in existing_pairs:
+                db.add(Duplicate(photo_id=photo_id, duplicate_of_id=match_id, similarity_score=1.0))
+                existing_pairs.add(pair)
+                saved_count += 1
+
+        db.query(Photo).filter(Photo.id == photo_id).update({"dedup_processed": True})
+
+        if (i + 1) % 2000 == 0:
+            db.commit()
+            _update_job_status(db, "dedup", i + 1, total, "running", f"{saved_count} duplicates found so far")
+            print(f"[dedup] Processed {i + 1}/{total} photos, {saved_count} duplicates found so far")
 
     db.commit()
-    return {"duplicates_found": len(saved), "duplicates": saved}
+    _update_job_status(db, "dedup", total, total, "done", f"{saved_count} duplicates found total")
+    print(f"[dedup] Done. Processed {total} photos, {saved_count} duplicates found total")
+    return {"duplicates_found": saved_count, "photos_processed": total}
 
 
 @app.get("/duplicates")
@@ -140,9 +204,18 @@ def list_duplicates(db: Session = Depends(get_db), limit: int = 50):
 
 @app.post("/faces/cluster")
 def run_face_clustering(db: Session = Depends(get_db)):
+    """Detects and clusters faces in all unprocessed photos.
+
+    Commits every 500 photos processed (not just once at the end) so an
+    interruption doesn't lose all progress. Progress is written to job_status
+    (poll GET /jobs/status from a separate request to see it live) and printed
+    to server logs.
+    """
     unprocessed_photos = db.query(Photo).filter(Photo.faces_processed == False).all()
+    total = len(unprocessed_photos)
 
     if not unprocessed_photos:
+        _update_job_status(db, "faces_cluster", 0, 0, "done", "No new photos to process")
         return {"message": "No new photos to process", "faces_found": 0}
 
     existing_faces = db.query(Face).all()
@@ -150,7 +223,9 @@ def run_face_clustering(db: Session = Depends(get_db)):
     known_cluster_ids = [f.cluster_id for f in existing_faces]
 
     faces_found = 0
-    for photo in unprocessed_photos:
+    _update_job_status(db, "faces_cluster", 0, total, "running", "0 faces found so far")
+
+    for i, photo in enumerate(unprocessed_photos):
         encodings = detect_faces(photo.source_path)
         for enc in encodings:
             matched_cluster_id = None
@@ -175,8 +250,15 @@ def run_face_clustering(db: Session = Depends(get_db)):
 
         photo.faces_processed = True
 
+        if (i + 1) % 500 == 0:
+            db.commit()
+            _update_job_status(db, "faces_cluster", i + 1, total, "running", f"{faces_found} faces found so far")
+            print(f"[faces/cluster] Processed {i + 1}/{total} photos, {faces_found} faces found so far")
+
     db.commit()
-    return {"faces_found": faces_found, "photos_processed": len(unprocessed_photos)}
+    _update_job_status(db, "faces_cluster", total, total, "done", f"{faces_found} faces found total")
+    print(f"[faces/cluster] Done. Processed {total} photos, {faces_found} faces found total")
+    return {"faces_found": faces_found, "photos_processed": total}
 
 
 @app.get("/faces/clusters")

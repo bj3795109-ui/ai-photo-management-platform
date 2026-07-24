@@ -14,6 +14,8 @@ token.json
 lfw_images/
 data/
 tests/fixtures/
+stl10_images/
+stl10_data/
  
 # Docker
 # (docker-compose.yml and Dockerfile ARE tracked, this just excludes runtime volumes if any appear locally)
