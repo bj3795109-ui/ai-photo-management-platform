@@ -16,6 +16,8 @@ data/
 tests/fixtures/
 stl10_images/
 stl10_data/
+tobacco3482_data/
+tobacco3482_images/
  
 # Docker
 # (docker-compose.yml and Dockerfile ARE tracked, this just excludes runtime volumes if any appear locally)

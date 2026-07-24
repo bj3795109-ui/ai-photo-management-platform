@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Photo Platform</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            500: '#0ea5e9',
+                            600: '#0284c7',
+                            900: '#0c4a6e',
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Vue 3 -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f9fafb; color: #111827; }
+        .masonry-grid { column-count: 1; column-gap: 16px; }
+        @media (min-width: 640px) { .masonry-grid { column-count: 2; } }
+        @media (min-width: 768px) { .masonry-grid { column-count: 3; } }
+        @media (min-width: 1024px) { .masonry-grid { column-count: 4; } }
+        @media (min-width: 1280px) { .masonry-grid { column-count: 5; } }
+        .masonry-item { break-inside: avoid; margin-bottom: 16px; }
+        
+        .photo-hover { transition: transform 0.2s ease, box-shadow 0.2s ease; }
+        .photo-hover:hover { transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }
+        
+        /* Custom scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        
+        /* Hide scrollbar for grid */
+        .hide-scroll::-webkit-scrollbar { display: none; }
+        .hide-scroll { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body class="flex h-screen overflow-hidden">
+    <div id="app" class="flex w-full h-full">
+        <!-- Sidebar -->
+        <aside class="w-64 bg-white border-r border-gray-200 flex flex-col hidden md:flex z-10">
+            <div class="h-16 flex items-center px-6 border-b border-gray-100">
+                <svg class="w-8 h-8 text-brand-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                <span class="text-xl font-bold text-gray-900 tracking-tight">AI Photos</span>
+            </div>
+            
+            <nav class="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+                <a v-for="item in navItems" :key="item.id" @click="currentView = item.id" 
+                   :class="['group flex items-center px-3 py-2 text-sm font-medium rounded-md cursor-pointer transition-colors', 
+                           currentView === item.id ? 'bg-brand-50 text-brand-600' : 'text-gray-700 hover:bg-gray-50 hover:text-gray-900']">
+                    <span v-html="item.icon" :class="['flex-shrink-0 -ml-1 mr-3 h-6 w-6', currentView === item.id ? 'text-brand-600' : 'text-gray-400 group-hover:text-gray-500']"></span>
+                    <span class="truncate">{{ item.label }}</span>
+                </a>
+            </nav>
+            
+            <!-- Connection Status -->
+            <div class="p-4 border-t border-gray-200 text-xs flex items-center text-gray-500">
+                <div class="w-2 h-2 rounded-full mr-2" :class="apiConnected ? 'bg-green-500' : 'bg-red-500'"></div>
+                {{ apiConnected ? 'Connected to Core API' : 'Reconnecting...' }}
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="flex-1 flex flex-col h-full bg-gray-50 overflow-hidden relative">
+            <!-- Mobile Header -->
+            <header class="md:hidden h-14 bg-white border-b border-gray-200 flex items-center justify-between px-4">
+                <div class="flex items-center">
+                    <svg class="w-6 h-6 text-brand-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                    <span class="text-lg font-bold">AI Photos</span>
+                </div>
+                <select v-model="currentView" class="border-gray-300 rounded-md text-sm focus:ring-brand-500 focus:border-brand-500">
+                    <option v-for="item in navItems" :value="item.id">{{ item.label }}</option>
+                </select>
+            </header>
+            
+            <!-- Active Job Banner -->
+            <div v-if="activeJobs.length > 0" class="bg-blue-600 text-white px-4 py-3 flex flex-col gap-2 shadow-md z-20 transition-all duration-300">
+                <div v-for="job in activeJobs" :key="job.name" class="flex items-center justify-between text-sm">
+                    <div class="flex items-center">
+                        <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <span class="font-medium capitalize">{{ job.name.replace('_', ' ') }} Processing</span>
+                        <span class="ml-2 opacity-80">{{ job.processed }} / {{ job.total }} ({{ Math.round((job.processed/job.total)*100) || 0 }}%)</span>
+                    </div>
+                    <span class="opacity-80 text-xs">{{ job.extra_info }}</span>
+                </div>
+            </div>
+
+            <!-- Scrollable View Area -->
+            <div class="flex-1 overflow-y-auto p-4 md:p-8" id="scroll-container">
+                
+                <!-- GALLERY VIEW -->
+                <div v-show="currentView === 'gallery'">
+                    <div class="flex justify-between items-center mb-6">
+                        <h1 class="text-2xl font-bold text-gray-900">Gallery</h1>
+                        <span class="text-sm text-gray-500">{{ galleryPhotos.length }} latest photos</span>
+                    </div>
+                    
+                    <div v-if="loading.gallery" class="flex justify-center py-20">
+                        <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-brand-600"></div>
+                    </div>
+                    
+                    <div v-else class="masonry-grid">
+                        <div v-for="photo in galleryPhotos" :key="photo.id" class="masonry-item relative group photo-hover rounded-xl overflow-hidden cursor-pointer bg-gray-200" @click="openLightbox(photo)">
+                            <img :src="imgUrl(photo.id)" loading="lazy" class="w-full h-auto object-cover" @error="handleImgError">
+                            <div class="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-end p-4">
+                                <span class="text-white text-xs font-medium truncate drop-shadow-md">{{ photo.source_path }}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SEARCH VIEW -->
+                <div v-show="currentView === 'search'">
+                    <div class="max-w-3xl mx-auto text-center mb-8 pt-8">
+                        <h1 class="text-3xl font-bold text-gray-900 mb-4">Semantic Search</h1>
+                        <p class="text-gray-500 mb-8">Search your entire library using natural language.</p>
+                        
+                        <div class="relative max-w-2xl mx-auto shadow-sm group">
+                            <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                                <svg class="h-5 w-5 text-gray-400 group-focus-within:text-brand-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                            </div>
+                            <input type="text" v-model="searchQuery" @input="debouncedSearch" 
+                                   class="block w-full pl-11 pr-4 py-4 border border-gray-300 rounded-xl text-lg outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 transition-all shadow-sm" 
+                                   placeholder="e.g. 'dog playing in the park', 'sunset over mountains'">
+                        </div>
+                        
+                        <div class="mt-4 flex flex-wrap justify-center gap-2">
+                            <button v-for="s in ['documents', 'nature landscape', 'animals', 'vehicle or car']" 
+                                    @click="searchQuery = s; searchPhotos()"
+                                    class="px-3 py-1 bg-white border border-gray-200 rounded-full text-sm text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors cursor-pointer">
+                                {{ s }}
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div v-if="loading.search" class="flex justify-center py-20">
+                        <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-brand-600"></div>
+                    </div>
+                    
+                    <div v-else-if="searchResults.length > 0">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-4">{{ searchResults.length }} Results for "{{ lastSearchQuery }}"</h3>
+                        <div class="masonry-grid">
+                            <div v-for="photo in searchResults" :key="photo.id" class="masonry-item relative group photo-hover rounded-xl overflow-hidden cursor-pointer bg-gray-200" @click="openLightbox(photo)">
+                                <img :src="imgUrl(photo.id)" loading="lazy" class="w-full h-auto object-cover" @error="handleImgError">
+                                <div class="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-end p-4">
+                                    <span class="text-white text-xs font-medium truncate drop-shadow-md">{{ photo.source_path || '' }}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div v-else-if="lastSearchQuery && searchResults.length === 0" class="text-center py-20 text-gray-500 bg-white rounded-xl border border-gray-200 shadow-sm">
+                        <svg class="mx-auto h-12 w-12 text-gray-300 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                        No results found. Try a different description.
+                    </div>
+                </div>
+
+                <!-- UPLOAD VIEW -->
+                <div v-show="currentView === 'upload'" class="max-w-4xl mx-auto">
+                    <h1 class="text-2xl font-bold text-gray-900 mb-6">Upload & Import</h1>
+                    
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-8">
+                        <div class="flex border-b border-gray-200 overflow-x-auto">
+                            <button @click="uploadTab = 'local'" :class="['flex-1 py-4 px-4 min-w-max text-sm font-medium text-center transition-colors', uploadTab === 'local' ? 'text-brand-600 border-b-2 border-brand-600 bg-brand-50' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50']">Local Device</button>
+                            <button @click="uploadTab = 'gphotos'" :class="['flex-1 py-4 px-4 min-w-max text-sm font-medium text-center transition-colors', uploadTab === 'gphotos' ? 'text-brand-600 border-b-2 border-brand-600 bg-brand-50' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50']">Google Photos</button>
+                            <button @click="uploadTab = 'gdrive'" :class="['flex-1 py-4 px-4 min-w-max text-sm font-medium text-center transition-colors', uploadTab === 'gdrive' ? 'text-brand-600 border-b-2 border-brand-600 bg-brand-50' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50']">Google Drive</button>
+                        </div>
+                        
+                        <div class="p-6 sm:p-8">
+                            <!-- Local Upload -->
+                            <div v-show="uploadTab === 'local'">
+                                <div @dragover.prevent="dragover = true" @dragleave.prevent="dragover = false" @drop.prevent="handleDrop"
+                                     @click="$refs.fileInput.click()"
+                                     :class="['border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-colors', 
+                                              dragover ? 'border-brand-500 bg-brand-50' : 'border-gray-300 hover:border-gray-400 hover:bg-gray-50']">
+                                    <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
+                                    <p class="mt-2 text-sm font-medium text-gray-900">Click to upload or drag and drop</p>
+                                    <p class="mt-1 text-xs text-gray-500">JPG, PNG, WEBP supported</p>
+                                </div>
+                                <input type="file" ref="fileInput" multiple accept="image/*" class="hidden" @change="handleFileSelect">
+                            </div>
+                            
+                            <!-- Google Photos -->
+                            <div v-show="uploadTab === 'gphotos'" class="text-center py-6">
+                                <svg class="mx-auto h-12 w-12 text-blue-500 mb-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15h2v-6h-2v6zm1-8c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1z"/></svg>
+                                <h3 class="text-lg font-medium text-gray-900 mb-2">Import from Google Photos</h3>
+                                <p class="text-sm text-gray-500 mb-6 max-w-md mx-auto">Connect your Google account to securely import photos directly into your library.</p>
+                                <button @click="startGPhotosSession" :disabled="loading.gphotos" class="inline-flex items-center px-6 py-2.5 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50">
+                                    <span v-if="loading.gphotos">Starting Session...</span>
+                                    <span v-else>Connect Google Photos</span>
+                                </button>
+                                
+                                <div v-if="gphotosAuthUrl" class="mt-8 p-5 bg-gray-50 rounded-lg text-left border border-gray-200">
+                                    <div class="flex items-start">
+                                        <div class="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-blue-100 text-blue-600 font-bold text-xs">1</div>
+                                        <div class="ml-3">
+                                            <p class="text-sm font-medium text-gray-900 mb-1">Authorize Access</p>
+                                            <a :href="gphotosAuthUrl" target="_blank" class="text-brand-600 hover:underline text-sm break-all font-medium">{{ gphotosAuthUrl }}</a>
+                                        </div>
+                                    </div>
+                                    <div class="mt-6 flex items-start">
+                                        <div class="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-blue-100 text-blue-600 font-bold text-xs">2</div>
+                                        <div class="ml-3">
+                                            <p class="text-sm font-medium text-gray-900 mb-2">Confirm Import</p>
+                                            <p class="text-xs text-gray-500 mb-3">Only click this after granting permission in the new tab.</p>
+                                            <button @click="triggerGPhotosImport" class="px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-brand-500">
+                                                Start Import Background Job
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Google Drive -->
+                            <div v-show="uploadTab === 'gdrive'" class="text-center py-6">
+                                <svg class="mx-auto h-12 w-12 text-green-500 mb-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15h2v-6h-2v6zm1-8c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1z"/></svg>
+                                <h3 class="text-lg font-medium text-gray-900 mb-2">Google Drive Integration</h3>
+                                <p class="text-sm text-gray-500 max-w-md mx-auto mb-4">You can set your storage backend to Google Drive to keep your files off the local disk.</p>
+                                <div class="inline-block p-4 bg-yellow-50 rounded border border-yellow-200 text-yellow-800 text-sm">
+                                    <strong>Note:</strong> Google Drive backend support is wired in the core codebase, but requires manual OAuth setup by an administrator before it can be toggled via the UI.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Upload Queue -->
+                    <div v-if="uploadQueue.length > 0" class="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+                        <h3 class="text-sm font-medium text-gray-900 border-b border-gray-100 pb-3 mb-2 flex items-center justify-between">
+                            Recent Local Uploads
+                            <span class="text-xs font-normal text-gray-500">{{ uploadQueue.length }} files</span>
+                        </h3>
+                        <ul class="space-y-2 max-h-60 overflow-y-auto pr-2">
+                            <li v-for="item in uploadQueue" :key="item.id" class="flex items-center justify-between text-sm p-2 hover:bg-gray-50 rounded">
+                                <div class="flex items-center truncate max-w-[70%]">
+                                    <svg class="h-4 w-4 mr-2 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                                    <span class="truncate">{{ item.name }}</span>
+                                </div>
+                                <span :class="{'text-yellow-600': item.status === 'uploading', 'text-green-600': item.status === 'success', 'text-red-600': item.status === 'error'}" class="font-medium text-xs flex items-center bg-gray-50 px-2 py-1 rounded">
+                                    <svg v-if="item.status === 'uploading'" class="animate-spin -ml-1 mr-1.5 h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                    <span v-if="item.status === 'uploading'">Uploading...</span>
+                                    <span v-else-if="item.status === 'success'">ML Queued</span>
+                                    <span v-else>Failed</span>
+                                </span>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- FACES VIEW -->
+                <div v-show="currentView === 'faces'">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+                        <div>
+                            <h1 class="text-2xl font-bold text-gray-900">Face Clusters</h1>
+                            <p class="text-sm text-gray-500">People identified across your library</p>
+                        </div>
+                        <button @click="triggerFacesJob" :disabled="isJobRunning('faces')" class="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50">
+                            <svg class="-ml-1 mr-2 h-5 w-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+                            {{ isJobRunning('faces') ? 'Running...' : 'Run Face Detection' }}
+                        </button>
+                    </div>
+                    
+                    <div v-if="loading.faces" class="flex justify-center py-20">
+                        <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-brand-600"></div>
+                    </div>
+                    
+                    <div v-else-if="faceClusters.length === 0" class="text-center py-20 bg-white border border-gray-200 rounded-xl shadow-sm">
+                        <svg class="mx-auto h-12 w-12 text-gray-300 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+                        <h3 class="text-lg font-medium text-gray-900 mb-1">No Faces Detected</h3>
+                        <p class="text-gray-500 mb-4">Run face detection to automatically group photos of the same people.</p>
+                        <button @click="triggerFacesJob" class="text-brand-600 font-medium hover:underline">Start Detection Job</button>
+                    </div>
+                    
+                    <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                        <div v-for="cluster in faceClusters" :key="cluster.cluster_id" class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-shadow">
+                            <div class="p-4 border-b border-gray-100 flex justify-between items-center">
+                                <h3 class="font-semibold text-gray-900 truncate pr-2">{{ cluster.label || 'Person ' + cluster.cluster_id.substring(0,6) }}</h3>
+                                <span class="bg-blue-50 text-blue-700 text-xs px-2.5 py-0.5 rounded-full font-medium whitespace-nowrap">{{ cluster.face_count }} items</span>
+                            </div>
+                            <div class="grid grid-cols-3 gap-0.5 p-0.5 bg-gray-100">
+                                <div v-for="(url, idx) in cluster.photo_image_urls.slice(0, 6)" :key="idx" class="aspect-square bg-gray-200 overflow-hidden relative">
+                                    <img :src="url" loading="lazy" class="w-full h-full object-cover" @error="handleImgError">
+                                    <div v-if="idx === 5 && cluster.photo_image_urls.length > 6" class="absolute inset-0 bg-black/60 flex items-center justify-center text-white text-xs font-bold">
+                                        +{{ cluster.photo_image_urls.length - 6 }}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- DUPLICATES VIEW -->
+                <div v-show="currentView === 'duplicates'">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+                        <div>
+                            <h1 class="text-2xl font-bold text-gray-900">Duplicates</h1>
+                            <p class="text-sm text-gray-500" v-if="dupStats.count > 0">Showing page {{ dupPage }} of {{ Math.ceil(dupStats.count / 50) || 1 }} ({{ dupStats.count.toLocaleString() }} pairs total)</p>
+                            <p class="text-sm text-gray-500" v-else>Find visually identical photos</p>
+                        </div>
+                        <button @click="triggerDedupJob" :disabled="isJobRunning('dedup')" class="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50">
+                            <svg class="-ml-1 mr-2 h-5 w-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                            {{ isJobRunning('dedup') ? 'Running...' : 'Scan Library' }}
+                        </button>
+                    </div>
+                    
+                    <div v-if="loading.duplicates" class="flex justify-center py-20">
+                        <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-brand-600"></div>
+                    </div>
+                    
+                    <div v-else-if="duplicates.length === 0" class="text-center py-20 bg-white border border-gray-200 rounded-xl shadow-sm">
+                        <svg class="mx-auto h-12 w-12 text-gray-300 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                        <h3 class="text-lg font-medium text-gray-900 mb-1">No Duplicates Found</h3>
+                        <p class="text-gray-500 mb-4">Run a scan to find visually identical photos in your library.</p>
+                        <button @click="triggerDedupJob" class="text-brand-600 font-medium hover:underline">Start Deduplication Job</button>
+                    </div>
+                    
+                    <div v-else>
+                        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 mb-6">
+                            <div v-for="(dup, idx) in duplicates" :key="idx" class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-shadow">
+                                <div class="flex h-32 md:h-40 bg-gray-100 relative group">
+                                    <div class="w-1/2 relative">
+                                        <img :src="dup.photo_image_url" class="w-full h-full object-cover cursor-pointer transition-opacity group-hover:opacity-90" @click="openLightbox({id: dup.photo_id})" @error="handleImgError">
+                                    </div>
+                                    <div class="w-px bg-white z-10 shadow-sm relative">
+                                        <div class="absolute inset-y-0 -left-[10px] w-[20px] bg-gradient-to-r from-black/10 to-transparent pointer-events-none"></div>
+                                    </div>
+                                    <div class="w-1/2 relative">
+                                        <img :src="dup.duplicate_of_image_url" class="w-full h-full object-cover cursor-pointer transition-opacity group-hover:opacity-90" @click="openLightbox({id: dup.duplicate_of_id})" @error="handleImgError">
+                                    </div>
+                                </div>
+                                <div class="p-3 bg-white border-t border-gray-100 flex justify-between items-center text-xs">
+                                    <span class="text-gray-500 font-mono truncate mr-2" title="Pair IDs">{{ dup.photo_id.substring(0,5) }} ↔ {{ dup.duplicate_of_id.substring(0,5) }}</span>
+                                    <span class="bg-red-50 text-red-700 px-2 py-0.5 rounded font-medium whitespace-nowrap">Duplicate Pair</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Pagination -->
+                        <div v-if="dupStats.count > 50" class="flex justify-center items-center space-x-4 border-t border-gray-200 pt-6 mt-4">
+                            <button @click="changeDupPage(-1)" :disabled="dupPage <= 1" class="px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 transition-colors">Previous</button>
+                            <span class="text-sm font-medium text-gray-600 bg-gray-100 px-3 py-1 rounded">Page {{ dupPage }}</span>
+                            <button @click="changeDupPage(1)" :disabled="dupPage >= Math.ceil(dupStats.count / 50)" class="px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 transition-colors">Next</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- DASHBOARD VIEW -->
+                <div v-show="currentView === 'dashboard'" class="max-w-5xl mx-auto">
+                    <h1 class="text-2xl font-bold text-gray-900 mb-6">Library Dashboard</h1>
+                    
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 flex flex-col justify-center">
+                            <div class="flex items-center text-gray-500 mb-2">
+                                <svg class="h-4 w-4 mr-2 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                                <span class="text-xs font-medium uppercase tracking-wide">Total Photos</span>
+                            </div>
+                            <p class="text-3xl font-bold text-gray-900">{{ dashStats.photos.toLocaleString() }}</p>
+                        </div>
+                        
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 flex flex-col justify-center">
+                            <div class="flex items-center text-gray-500 mb-2">
+                                <svg class="h-4 w-4 mr-2 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+                                <span class="text-xs font-medium uppercase tracking-wide">Faces Detected</span>
+                            </div>
+                            <p class="text-3xl font-bold text-gray-900">{{ dashStats.faces.toLocaleString() }}</p>
+                        </div>
+                        
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 flex flex-col justify-center">
+                            <div class="flex items-center text-gray-500 mb-2">
+                                <svg class="h-4 w-4 mr-2 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
+                                <span class="text-xs font-medium uppercase tracking-wide">Face Clusters</span>
+                            </div>
+                            <p class="text-3xl font-bold text-gray-900">{{ dashStats.clusters.toLocaleString() }}</p>
+                        </div>
+                        
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 flex flex-col justify-center">
+                            <div class="flex items-center text-gray-500 mb-2">
+                                <svg class="h-4 w-4 mr-2 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                                <span class="text-xs font-medium uppercase tracking-wide">Duplicate Pairs</span>
+                            </div>
+                            <p class="text-3xl font-bold text-gray-900">{{ dashStats.dups.toLocaleString() }}</p>
+                        </div>
+                    </div>
+                    
+                    <div v-if="allJobs.length > 0">
+                        <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+                            Background Jobs
+                            <span v-if="activeJobs.length > 0" class="ml-3 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 animate-pulse">
+                                {{ activeJobs.length }} Active
+                            </span>
+                        </h2>
+                        
+                        <div class="bg-white border border-gray-200 shadow-sm rounded-xl overflow-hidden">
+                            <ul class="divide-y divide-gray-100">
+                                <li v-for="job in allJobs" :key="job.name" class="p-5 hover:bg-gray-50 transition-colors">
+                                    <div class="flex items-center justify-between mb-2">
+                                        <div class="flex items-center">
+                                            <div :class="['w-2.5 h-2.5 rounded-full mr-3', job.status === 'running' ? 'bg-blue-500' : 'bg-green-500']"></div>
+                                            <p class="text-sm font-semibold text-gray-900 capitalize">{{ job.name.replace('_', ' ') }}</p>
+                                        </div>
+                                        <div class="text-sm font-medium" :class="job.status === 'running' ? 'text-blue-600' : 'text-gray-500'">
+                                            {{ job.status === 'running' ? Math.round((job.processed/job.total)*100) + '%' : 'Completed' }}
+                                        </div>
+                                    </div>
+                                    
+                                    <div v-if="job.status === 'running'" class="w-full bg-gray-200 rounded-full h-1.5 mb-3 overflow-hidden ml-5.5">
+                                        <div class="bg-blue-500 h-1.5 rounded-full transition-all duration-500" :style="{ width: (job.total > 0 ? (job.processed/job.total)*100 : 0) + '%' }"></div>
+                                    </div>
+                                    
+                                    <div class="ml-[22px] flex justify-between items-end">
+                                        <p class="text-xs text-gray-600">{{ job.extra_info || 'Processed ' + job.processed + ' / ' + job.total }}</p>
+                                        <p class="text-xs text-gray-400" v-if="job.updated_at">{{ new Date(job.updated_at).toLocaleString() }}</p>
+                                    </div>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+        
+        <!-- Lightbox -->
+        <div v-if="lightbox.show" class="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/95 backdrop-blur-sm transition-opacity" @click="lightbox.show = false">
+            <button @click="lightbox.show = false" class="absolute top-6 right-6 text-white/50 hover:text-white p-2 rounded-full bg-white/10 hover:bg-white/20 transition-all focus:outline-none focus:ring-2 focus:ring-white">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+            <div class="max-w-6xl max-h-[90vh] p-4 flex flex-col items-center" @click.stop>
+                <img :src="imgUrl(lightbox.photo.id)" class="max-w-full max-h-[80vh] object-contain rounded shadow-2xl">
+                <div class="bg-black/50 backdrop-blur-md px-4 py-2 rounded-full mt-4 text-white/90 font-mono text-sm shadow-lg">
+                    {{ lightbox.photo.source_path || lightbox.photo.id }}
+                </div>
+            </div>
+        </div>
+        
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted, computed, watch } = Vue;
+        
+        const API = "http://localhost:8000";
+
+        createApp({
+            setup() {
+                const currentView = ref('gallery');
+                const apiConnected = ref(false);
+                const uploadTab = ref('local');
+                const lightbox = ref({ show: false, photo: null });
+                
+                // State Data
+                const galleryPhotos = ref([]);
+                const searchResults = ref([]);
+                const searchQuery = ref('');
+                const lastSearchQuery = ref('');
+                const faceClusters = ref([]);
+                const duplicates = ref([]);
+                const uploadQueue = ref([]);
+                
+                // Pagination & Stats
+                const dupPage = ref(1);
+                const dupStats = ref({ count: 0 });
+                const facesStats = ref({ clusters: 0 });
+                const dashStats = ref({ photos: 0, faces: 0, clusters: 0, dups: 0 });
+                
+                // Jobs
+                const allJobs = ref([]);
+                const activeJobs = computed(() => allJobs.value.filter(j => j.status === 'running'));
+                
+                // UI State
+                const loading = ref({
+                    gallery: true, search: false, faces: true, duplicates: true, dashboard: true, gphotos: false
+                });
+                const dragover = ref(false);
+                const gphotosAuthUrl = ref('');
+                const gphotosSessionId = ref('');
+                
+                let searchTimeout = null;
+                let pollInterval = null;
+
+                const navItems = [
+                    { id: 'gallery', label: 'Gallery', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>' },
+                    { id: 'search', label: 'Search', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>' },
+                    { id: 'upload', label: 'Upload & Import', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>' },
+                    { id: 'faces', label: 'Faces', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path>' },
+                    { id: 'duplicates', label: 'Duplicates', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>' },
+                    { id: 'dashboard', label: 'Dashboard', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>' }
+                ];
+
+                // Fetch Wrappers
+                async function fetchApi(path, options = {}) {
+                    const res = await fetch(`${API}${path}`, options);
+                    if (!res.ok) throw new Error(`API Error: ${res.status}`);
+                    return res.json();
+                }
+                
+                const imgUrl = (id) => `${API}/photos/${id}/image`;
+                const handleImgError = (e) => { e.target.style.display = 'none'; };
+                
+                const openLightbox = (photo) => {
+                    lightbox.value = { show: true, photo };
+                };
+
+                // Views Loaders
+                async function loadGallery() {
+                    loading.value.gallery = true;
+                    try {
+                        galleryPhotos.value = await fetchApi('/photos');
+                        apiConnected.value = true;
+                    } catch (e) {
+                        console.error(e);
+                        apiConnected.value = false;
+                    } finally {
+                        loading.value.gallery = false;
+                    }
+                }
+
+                function debouncedSearch() {
+                    clearTimeout(searchTimeout);
+                    if (!searchQuery.value.trim()) {
+                        searchResults.value = [];
+                        lastSearchQuery.value = '';
+                        return;
+                    }
+                    searchTimeout = setTimeout(searchPhotos, 500);
+                }
+
+                async function searchPhotos() {
+                    const q = searchQuery.value.trim();
+                    if (!q) return;
+                    loading.value.search = true;
+                    lastSearchQuery.value = q;
+                    try {
+                        const data = await fetchApi(`/search?q=${encodeURIComponent(q)}&top_k=20`);
+                        searchResults.value = data.results || [];
+                    } catch (e) {
+                        console.error(e);
+                    } finally {
+                        loading.value.search = false;
+                    }
+                }
+
+                async function loadFaces() {
+                    loading.value.faces = true;
+                    try {
+                        const data = await fetchApi('/faces/clusters');
+                        faceClusters.value = data.clusters || [];
+                        facesStats.value.clusters = data.cluster_count || 0;
+                    } catch (e) {
+                        console.error(e);
+                    } finally {
+                        loading.value.faces = false;
+                    }
+                }
+
+                async function loadDuplicates() {
+                    loading.value.duplicates = true;
+                    try {
+                        const limit = 50;
+                        const offset = (dupPage.value - 1) * limit;
+                        const data = await fetchApi(`/api/duplicates?limit=${limit}&offset=${offset}`);
+                        duplicates.value = data.duplicates || [];
+                        dupStats.value.count = data.count || 0;
+                    } catch (e) {
+                        console.error(e);
+                    } finally {
+                        loading.value.duplicates = false;
+                    }
+                }
+
+                function changeDupPage(delta) {
+                    dupPage.value += delta;
+                    loadDuplicates();
+                }
+
+                async function loadDashboard() {
+                    try {
+                        const [pCount, cData, dData] = await Promise.all([
+                            fetchApi('/api/photos/count').catch(()=>({count:0})),
+                            fetchApi('/faces/clusters').catch(()=>({cluster_count:0, clusters:[]})),
+                            fetchApi('/api/duplicates?limit=1').catch(()=>({count:0}))
+                        ]);
+                        
+                        const totalFaces = (cData.clusters || []).reduce((sum, c) => sum + (c.face_count || 0), 0);
+                        dashStats.value = {
+                            photos: pCount.count || 0,
+                            clusters: cData.cluster_count || 0,
+                            faces: totalFaces,
+                            dups: dData.count || 0
+                        };
+                    } catch (e) {
+                        console.error(e);
+                    }
+                }
+
+                // Jobs Polling
+                async function pollJobs() {
+                    try {
+                        const jobsDict = await fetchApi('/jobs/status');
+                        const arr = Object.keys(jobsDict).map(k => ({ name: k, ...jobsDict[k] }));
+                        arr.sort((a,b) => new Date(b.updated_at) - new Date(a.updated_at));
+                        allJobs.value = arr;
+                    } catch (e) {
+                        apiConnected.value = false;
+                    }
+                }
+
+                function isJobRunning(name) {
+                    return activeJobs.value.some(j => j.name === name);
+                }
+
+                async function triggerFacesJob() {
+                    try {
+                        await fetchApi('/faces/cluster', { method: 'POST' });
+                        pollJobs(); // update status immediately
+                    } catch (e) {
+                        alert('Failed to start face clustering');
+                    }
+                }
+
+                async function triggerDedupJob() {
+                    try {
+                        await fetchApi('/dedup', { method: 'POST' });
+                        pollJobs(); // update status immediately
+                    } catch (e) {
+                        alert('Failed to start deduplication');
+                    }
+                }
+
+                // Upload Handling
+                function handleDrop(e) {
+                    dragover.value = false;
+                    if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+                }
+                function handleFileSelect(e) {
+                    if (e.target.files.length) uploadFiles(e.target.files);
+                }
+                
+                async function uploadFiles(files) {
+                    for(let i=0; i<files.length; i++) {
+                        const file = files[i];
+                        const item = { id: Date.now()+i, name: file.name, status: 'uploading' };
+                        uploadQueue.value.unshift(item);
+                        
+                        try {
+                            const fd = new FormData();
+                            fd.append('file', file);
+                            await fetchApi('/ingest', { method: 'POST', body: fd });
+                            item.status = 'success';
+                        } catch (e) {
+                            item.status = 'error';
+                        }
+                    }
+                }
+
+                // Google Photos 
+                async function startGPhotosSession() {
+                    loading.value.gphotos = true;
+                    try {
+                        const res = await fetchApi('/google-photos/session', { method: 'POST' });
+                        gphotosSessionId.value = res.session_id;
+                        gphotosAuthUrl.value = res.auth_url;
+                    } catch (e) {
+                        alert("Google Photos integration needs OAuth credentials configured on the backend.");
+                    } finally {
+                        loading.value.gphotos = false;
+                    }
+                }
+                
+                async function triggerGPhotosImport() {
+                    if(!gphotosSessionId.value) return;
+                    try {
+                        await fetchApi(`/google-photos/session/${gphotosSessionId.value}/import`, { method: 'POST' });
+                        alert("Import job started! Check the dashboard/gallery for progress.");
+                        pollJobs();
+                    } catch (e) {
+                        alert("Failed to start import. Make sure you completed the OAuth flow.");
+                    }
+                }
+
+                // Watcher to load data when view changes
+                watch(currentView, (newVal) => {
+                    if (newVal === 'gallery' && galleryPhotos.value.length === 0) loadGallery();
+                    if (newVal === 'faces' && faceClusters.value.length === 0) loadFaces();
+                    if (newVal === 'duplicates') loadDuplicates(); // always reload duplicates for page sync
+                    if (newVal === 'dashboard') loadDashboard();
+                    
+                    // Reset scroll
+                    const el = document.getElementById('scroll-container');
+                    if (el) el.scrollTop = 0;
+                });
+
+                onMounted(() => {
+                    loadGallery();
+                    pollJobs();
+                    pollInterval = setInterval(pollJobs, 5000); // Poll every 5s for job status
+                });
+
+                return {
+                    currentView, navItems, apiConnected, loading,
+                    galleryPhotos, searchResults, searchQuery, lastSearchQuery, debouncedSearch, searchPhotos,
+                    faceClusters, facesStats, triggerFacesJob,
+                    duplicates, dupStats, dupPage, changeDupPage, triggerDedupJob,
+                    dashStats, allJobs, activeJobs, isJobRunning,
+                    uploadTab, dragover, handleDrop, handleFileSelect, uploadQueue,
+                    gphotosAuthUrl, startGPhotosSession, triggerGPhotosImport,
+                    imgUrl, handleImgError, lightbox, openLightbox
+                }
+            }
+        }).mount('#app')
+    </script>
+</body>
+</html>

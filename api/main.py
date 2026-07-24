@@ -284,7 +284,7 @@ def run_categorize(photo_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Photo not found or has no embedding")
 
     embedding = np.array(photo.embedding, dtype=np.float32)
-    category = categorize_image(embedding)
+    category = categorize_image(embedding, image_path=photo.storage_ref)
 
     record = Category(photo_id=photo_id, category=category, confidence=1.0)
     db.add(record)

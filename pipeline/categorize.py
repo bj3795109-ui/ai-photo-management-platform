@@ -38,7 +38,16 @@ def _get_category_embeddings(categories: dict[str, str]) -> dict[str, np.ndarray
     return {label: _category_embedding_cache[label] for label in categories}
 
 
-def categorize_image(image_embedding: np.ndarray, categories: dict[str, str] = None) -> str:
+from pipeline.document_classifier import classify_document
+
+def categorize_image(image_embedding: np.ndarray, categories: dict[str, str] = None, image_path: str = None) -> str:
+    # 1. Try OCR-based classification first for document types
+    if image_path:
+        doc_category = classify_document(image_path)
+        if doc_category:
+            return doc_category
+            
+    # 2. Fall back to CLIP visual classification
     """Categorizes an image embedding into one of the required categories.
 
     Returns the canonical category label (e.g. "documents"), not the CLIP prompt.
