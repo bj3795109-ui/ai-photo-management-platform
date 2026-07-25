@@ -1,11 +1,12 @@
 # AI Photo Management Platform
 
-An AI-powered photo management platform that connects to Google Photos and local storage, identifies duplicate and near-duplicate images, categorizes photos, groups people using facial recognition, and supports natural language search — built with FastAPI, PostgreSQL + pgvector, OpenCLIP, and Tesseract OCR.
+An AI-powered photo management platform that connects to Google Photos and local storage, identifies duplicate and near-duplicate images, categorizes photos, groups people using facial recognition, and supports natural language search — built with FastAPI, PostgreSQL + pgvector, OpenCLIP, and Tesseract OCR, with a Vue-based web interface.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for system architecture diagrams and detailed design decisions.
 
 ## Features
 
+- **Web UI** — gallery with infinite scroll, natural language search, face clusters, duplicates review, and upload/import (local device, Google Photos, Google Drive)
 - **Ingestion** from local storage and Google Photos (via the Picker API)
 - **Natural language search** over your photo library using CLIP embeddings
 - **Duplicate detection** — both exact/near-exact (perceptual hash) and semantic near-duplicates (CLIP similarity)
@@ -20,6 +21,7 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for system architecture diagrams and de
 ## Tech Stack
 
 - **API**: FastAPI
+- **Frontend**: Vue 3 (single-file, CDN-loaded) + Tailwind
 - **Database**: PostgreSQL + pgvector (vector similarity search)
 - **Embeddings**: OpenCLIP (`ViT-B-32-quickgelu`, OpenAI weights)
 - **Document classification**: Tesseract OCR (`pytesseract`) + keyword matching
@@ -86,13 +88,21 @@ docker compose up -d db
 
 **Note on Google Photos:** As of April 2025, Google restricted the Photos Library API — apps can no longer list a user's entire existing library without a formal Google verification process. This project uses the **Photos Picker API** instead: the user explicitly selects photos through Google's own picker UI each time, and the app receives access only to those selected items. See `ARCHITECTURE.md` for details.
 
+**Note on token expiry:** While the Google Cloud OAuth app is in "Testing" publish status (the default), Google expires refresh tokens after 7 days — you'll need to re-authenticate periodically (a browser window will open automatically when this happens). Moving the project to "Production" status removes this limit.
+
 ### 5. Run the API
 
 ```bash
 python -m uvicorn api.main:app --reload
 ```
 
-Visit `http://127.0.0.1:8000/docs` for interactive API documentation (Swagger UI).
+Visit `http://127.0.0.1:8000/docs` for interactive API documentation (Swagger UI), or open `frontend/index.html` directly in a browser for the web UI.
+
+**If upgrading an existing installation** (database created before the `created_at` column was added), run the one-time migration:
+```bash
+python scripts/add_created_at.py
+```
+(The API also attempts this automatically on startup, so this is usually optional — safe to run either way, it's idempotent.)
 
 ### 6. Run with Docker (full stack)
 
@@ -102,19 +112,30 @@ docker compose up -d
 
 This builds and runs both the API and database containers together. Your project folder is bind-mounted into the API container, so local storage and any bulk-downloaded datasets remain accessible.
 
+## Web UI
+
+Open `frontend/index.html` in a browser (with the API running at `http://127.0.0.1:8000`). Includes:
+
+- **Gallery** — infinite-scroll photo browsing
+- **Search** — natural language search box
+- **Upload & Import** — drag-and-drop local upload, Google Photos picker flow (with live status: idle → picking → importing → done/error), Google Drive
+- **Faces** — browse detected face clusters
+- **Duplicates** — review detected duplicate pairs side by side
+- **Dashboard** — library stats and running job status
+
 ## API Usage
 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/health` | Health check |
 | POST | `/ingest` | Upload and ingest a photo (multipart file upload) |
-| GET | `/photos` | List photos (paginated, limit 50) |
+| GET | `/photos?offset=0&limit=50` | List photos, paginated, newest first |
 | GET | `/photos/{id}` | Get photo metadata |
 | GET | `/photos/{id}/image` | View/download the actual image file |
 | DELETE | `/photos/{id}` | Delete a photo |
 | GET | `/search?q=...&top_k=5` | Natural language search |
 | POST | `/dedup` | Run duplicate detection (resumable, progress-tracked) |
-| GET | `/duplicates` | List detected duplicate pairs, with viewable image URLs |
+| GET | `/duplicates?offset=0&limit=50` | List detected duplicate pairs, paginated, with viewable image URLs |
 | POST | `/faces/cluster` | Run face detection/clustering (resumable, progress-tracked) |
 | GET | `/faces/clusters` | List face clusters, with viewable image URLs |
 | POST | `/photos/{id}/categorize` | Categorize a photo (OCR document path, falls back to CLIP visual path) |
@@ -158,16 +179,18 @@ Initial testing revealed that CLIP-only categorization was unreliable for the as
 - **Face clustering accuracy degrades on large libraries.** The incremental clustering approach (matching each new face against only its single nearest known face, rather than re-running full batch clustering) is vulnerable to error chaining: if two visually similar but distinct people are ever matched together early in a run, subsequent faces that are loosely close to either person can keep joining the same cluster, producing an oversized, incorrect "supercluster" over a long run. This was observed directly when testing against the full 13,233-image LFW dataset — one cluster grew to 1,056 faces (verified visually to include clearly different people).
   - **Why this trade-off was made:** batch DBSCAN re-clustering is accurate but doesn't scale — it would require re-processing the entire face history on every call. The incremental approach trades some accuracy for the ability to only process new photos, necessary at real library scale.
   - **How this would be fixed in production:** cap cluster size and periodically re-validate/split oversized clusters against their centroid, use a stricter tolerance combined with a minimum-confidence threshold before merging, or run a periodic batch DBSCAN reconciliation pass in the background.
+- **Database migrations are handled with inline/manual scripts, not a migration tool.** The `created_at` column addition uses an idempotent `DO $$ ... END $$` block run on startup, plus a standalone script (`scripts/add_created_at.py`) doing the same thing. This works for a single-developer project at this stage but doesn't track migration history or support rollback — a production system would use Alembic instead.
 
-## Scaling Considerations (tested up to 113,268 images)
+## Scaling Considerations (tested up to 116,000+ images)
 
-The system was stress-tested well beyond toy-scale demos, combining the full LFW dataset (13,233 images), STL-10's unlabeled split (100,000 images), a small Google Photos import (12 images), and the Tobacco3482 document dataset — **113,268+ total images**, clearing the assignment's 100,000-image requirement with real, tested data.
+The system was stress-tested well beyond toy-scale demos, combining the full LFW dataset (13,233 images), STL-10's unlabeled split (100,000 images), the Tobacco3482 document dataset, and Google Photos imports — **116,000+ total images**, clearing the assignment's 100,000-image requirement with real, tested data.
 
 ### What scaled well
 
 - **Bulk ingestion** (`scripts/bulk_ingest.py`) — batches 32 images per CLIP forward pass. Ingested 13,233 images in ~458 seconds, and 100,000 images in ~3,876 seconds (~26 images/sec), comfortably CPU-bound and demo-viable.
 - **Search** (`/search`) — backed by a pgvector `ivfflat` index on `photos.embedding`, so queries return in milliseconds regardless of library size.
 - **Face clustering re-runs** — a `faces_processed` flag per photo ensures only new/unprocessed photos are touched on subsequent calls.
+- **Gallery browsing** — paginated with infinite scroll rather than loading the entire library at once, keeping the UI responsive regardless of total photo count.
 
 ### What required rework at this scale
 
@@ -186,5 +209,5 @@ This was discovered through direct experience: the initial `/dedup` and `/faces/
 - [ ] CNN face detection toggle for improved accuracy
 - [ ] Periodic batch reconciliation pass to correct face clustering drift
 - [ ] ML-based document classifier to complement/replace keyword matching
-- [ ] Web UI for browsing/search (currently Swagger UI serves as the interactive interface)
+- [ ] Alembic migrations instead of inline/manual scripts
 - [ ] Postman collection
