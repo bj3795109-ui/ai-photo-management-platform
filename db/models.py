@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Float, DateTime, ForeignKey, Integer, Boolean, Index
+from sqlalchemy import Column, String, Float, DateTime, ForeignKey, Integer, Boolean, Index, func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from pgvector.sqlalchemy import Vector
 from db.database import Base
@@ -25,6 +25,7 @@ class Photo(Base):
     embedding = Column(Vector(CLIP_DIM), nullable=True)
     faces_processed = Column(Boolean, default=False)
     dedup_processed = Column(Boolean, default=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
 class Duplicate(Base):

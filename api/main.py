@@ -28,6 +28,23 @@ app = FastAPI(title="AI Photo Management Platform")
 
 Base.metadata.create_all(bind=engine)
 
+# Auto-migrate: add created_at column if missing (create_all doesn't add new
+# columns to existing tables, so we handle it explicitly).
+from sqlalchemy import text as _text
+with engine.connect() as _conn:
+    _conn.execute(_text("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'photos' AND column_name = 'created_at'
+            ) THEN
+                ALTER TABLE photos ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT now();
+            END IF;
+        END $$;
+    """))
+    _conn.commit()
+
 
 @app.get("/health")
 def health_check():
@@ -45,9 +62,21 @@ def ingest(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
 
 
 @app.get("/photos")
-def list_photos(db: Session = Depends(get_db)):
-    photos = db.query(Photo).limit(50).all()
-    return [{"id": p.id, "source_path": p.source_path} for p in photos]
+def list_photos(offset: int = 0, limit: int = 50, db: Session = Depends(get_db)):
+    total = db.query(Photo).count()
+    photos = (
+        db.query(Photo)
+        .order_by(Photo.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "photos": [{"id": p.id, "source_path": p.source_path} for p in photos],
+    }
 
 
 @app.get("/photos/{photo_id}")
@@ -186,8 +215,9 @@ def run_dedup(db: Session = Depends(get_db)):
 
 
 @app.get("/duplicates")
-def list_duplicates(db: Session = Depends(get_db), limit: int = 50):
-    duplicates = db.query(Duplicate).limit(limit).all()
+def list_duplicates(db: Session = Depends(get_db), limit: int = 50, offset: int = 0):
+    total = db.query(Duplicate).count()
+    duplicates = db.query(Duplicate).offset(offset).limit(limit).all()
     results = []
     for d in duplicates:
         photo = db.query(Photo).filter(Photo.id == d.photo_id).first()
@@ -199,7 +229,7 @@ def list_duplicates(db: Session = Depends(get_db), limit: int = 50):
             "duplicate_of_image_url": f"/photos/{d.duplicate_of_id}/image",
             "similarity_score": d.similarity_score,
         })
-    return {"count": len(results), "duplicates": results}
+    return {"count": total, "duplicates": results}
 
 
 @app.post("/faces/cluster")

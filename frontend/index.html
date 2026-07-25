@@ -114,19 +114,36 @@
                 <div v-show="currentView === 'gallery'">
                     <div class="flex justify-between items-center mb-6">
                         <h1 class="text-2xl font-bold text-gray-900">Gallery</h1>
-                        <span class="text-sm text-gray-500">{{ galleryPhotos.length }} latest photos</span>
+                        <span class="text-sm text-gray-500">{{ galleryPhotos.length }} of {{ galleryTotal }} photos</span>
                     </div>
                     
-                    <div v-if="loading.gallery" class="flex justify-center py-20">
+                    <div v-if="loading.gallery && galleryPhotos.length === 0" class="flex justify-center py-20">
                         <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-brand-600"></div>
                     </div>
                     
-                    <div v-else class="masonry-grid">
-                        <div v-for="photo in galleryPhotos" :key="photo.id" class="masonry-item relative group photo-hover rounded-xl overflow-hidden cursor-pointer bg-gray-200" @click="openLightbox(photo)">
-                            <img :src="imgUrl(photo.id)" loading="lazy" class="w-full h-auto object-cover" @error="handleImgError">
-                            <div class="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-end p-4">
-                                <span class="text-white text-xs font-medium truncate drop-shadow-md">{{ photo.source_path }}</span>
+                    <div v-else>
+                        <div class="masonry-grid">
+                            <div v-for="photo in galleryPhotos" :key="photo.id" class="masonry-item relative group photo-hover rounded-xl overflow-hidden cursor-pointer bg-gray-200" @click="openLightbox(photo)">
+                                <img :src="imgUrl(photo.id)" loading="lazy" class="w-full h-auto object-cover" @error="handleImgError">
+                                <div class="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-end p-4">
+                                    <span class="text-white text-xs font-medium truncate drop-shadow-md">{{ photo.source_path }}</span>
+                                </div>
                             </div>
+                        </div>
+                        
+                        <!-- Load more sentinel -->
+                        <div v-if="galleryHasMore" data-gallery-sentinel class="flex justify-center py-8">
+                            <div v-if="galleryLoadingMore" class="flex items-center gap-3 text-gray-400">
+                                <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-brand-600"></div>
+                                <span class="text-sm">Loading more photos…</span>
+                            </div>
+                            <button v-else @click="loadMoreGallery" class="px-5 py-2.5 bg-white border border-gray-200 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors shadow-sm">
+                                Load More
+                            </button>
+                        </div>
+                        
+                        <div v-else-if="galleryPhotos.length > 0" class="flex justify-center py-6">
+                            <span class="text-xs text-gray-400">You've reached the end — {{ galleryTotal }} photos total</span>
                         </div>
                     </div>
                 </div>
@@ -204,33 +221,92 @@
                             
                             <!-- Google Photos -->
                             <div v-show="uploadTab === 'gphotos'" class="text-center py-6">
-                                <svg class="mx-auto h-12 w-12 text-blue-500 mb-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15h2v-6h-2v6zm1-8c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1z"/></svg>
-                                <h3 class="text-lg font-medium text-gray-900 mb-2">Import from Google Photos</h3>
-                                <p class="text-sm text-gray-500 mb-6 max-w-md mx-auto">Connect your Google account to securely import photos directly into your library.</p>
-                                <button @click="startGPhotosSession" :disabled="loading.gphotos" class="inline-flex items-center px-6 py-2.5 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50">
-                                    <span v-if="loading.gphotos">Starting Session...</span>
-                                    <span v-else>Connect Google Photos</span>
-                                </button>
-                                
-                                <div v-if="gphotosAuthUrl" class="mt-8 p-5 bg-gray-50 rounded-lg text-left border border-gray-200">
-                                    <div class="flex items-start">
-                                        <div class="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-blue-100 text-blue-600 font-bold text-xs">1</div>
-                                        <div class="ml-3">
-                                            <p class="text-sm font-medium text-gray-900 mb-1">Authorize Access</p>
-                                            <a :href="gphotosAuthUrl" target="_blank" class="text-brand-600 hover:underline text-sm break-all font-medium">{{ gphotosAuthUrl }}</a>
+                                <!-- Idle state -->
+                                <template v-if="gphotosState === 'idle'">
+                                    <svg class="mx-auto h-12 w-12 text-blue-500 mb-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15h2v-6h-2v6zm1-8c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1z"/></svg>
+                                    <h3 class="text-lg font-medium text-gray-900 mb-2">Import from Google Photos</h3>
+                                    <p class="text-sm text-gray-500 mb-6 max-w-md mx-auto">Connect your Google account to securely import photos directly into your library.</p>
+                                    <button @click="startGPhotosSession" :disabled="loading.gphotos" class="inline-flex items-center px-6 py-2.5 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 transition-colors">
+                                        <svg v-if="loading.gphotos" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                        <span v-if="loading.gphotos">Creating Session...</span>
+                                        <span v-else>Connect Google Photos</span>
+                                    </button>
+                                </template>
+
+                                <!-- Picking state: user is choosing photos in the picker tab -->
+                                <template v-else-if="gphotosState === 'picking'">
+                                    <div class="max-w-lg mx-auto">
+                                        <div class="p-6 bg-blue-50 rounded-xl border border-blue-200">
+                                            <div class="flex items-center justify-center mb-4">
+                                                <div class="relative">
+                                                    <div class="w-12 h-12 rounded-full border-4 border-blue-200 border-t-blue-600 animate-spin"></div>
+                                                </div>
+                                            </div>
+                                            <h3 class="text-lg font-semibold text-blue-900 mb-2">Waiting for Photo Selection</h3>
+                                            <p class="text-sm text-blue-700 mb-4">A Google Photos picker opened in a new tab. Select the photos you'd like to import, then come back here.</p>
+                                            <div class="flex items-center justify-center gap-3">
+                                                <a :href="gphotosPickerUri" target="_blank" class="inline-flex items-center px-4 py-2 bg-white border border-blue-300 rounded-md text-sm font-medium text-blue-700 hover:bg-blue-50 transition-colors shadow-sm">
+                                                    <svg class="-ml-0.5 mr-1.5 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+                                                    Reopen Picker
+                                                </a>
+                                                <button @click="cancelGPhotosSession" class="inline-flex items-center px-4 py-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors shadow-sm">
+                                                    Cancel
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
-                                    <div class="mt-6 flex items-start">
-                                        <div class="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-blue-100 text-blue-600 font-bold text-xs">2</div>
-                                        <div class="ml-3">
-                                            <p class="text-sm font-medium text-gray-900 mb-2">Confirm Import</p>
-                                            <p class="text-xs text-gray-500 mb-3">Only click this after granting permission in the new tab.</p>
-                                            <button @click="triggerGPhotosImport" class="px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-brand-500">
-                                                Start Import Background Job
+                                </template>
+
+                                <!-- Importing state: downloading & ingesting -->
+                                <template v-else-if="gphotosState === 'importing'">
+                                    <div class="max-w-lg mx-auto">
+                                        <div class="p-6 bg-amber-50 rounded-xl border border-amber-200">
+                                            <svg class="mx-auto h-10 w-10 text-amber-500 mb-3 animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                                            <h3 class="text-lg font-semibold text-amber-900 mb-2">Importing Photos</h3>
+                                            <p class="text-sm text-amber-700">Downloading your selected photos and queuing them for ML processing…</p>
+                                        </div>
+                                    </div>
+                                </template>
+
+                                <!-- Success state -->
+                                <template v-else-if="gphotosState === 'done'">
+                                    <div class="max-w-lg mx-auto">
+                                        <div class="p-6 bg-green-50 rounded-xl border border-green-200">
+                                            <svg class="mx-auto h-10 w-10 text-green-500 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                            <h3 class="text-lg font-semibold text-green-900 mb-2">Import Complete!</h3>
+                                            <p class="text-sm text-green-700 mb-1"><strong>{{ gphotosImportResult.photos_picked }}</strong> photos queued for processing.</p>
+                                            <p class="text-xs text-green-600 mb-4">They'll appear in your Gallery once ML ingestion finishes.</p>
+                                            <div v-if="gphotosImportResult.filenames && gphotosImportResult.filenames.length" class="mb-4 max-h-32 overflow-y-auto text-left bg-white rounded-lg border border-green-200 p-3">
+                                                <p class="text-xs font-medium text-gray-700 mb-1">Imported files:</p>
+                                                <ul class="text-xs text-gray-500 space-y-0.5">
+                                                    <li v-for="f in gphotosImportResult.filenames" :key="f" class="truncate">• {{ f }}</li>
+                                                </ul>
+                                            </div>
+                                            <div class="flex items-center justify-center gap-3">
+                                                <button @click="gphotosState = 'idle'; currentView = 'gallery'; loadGallery()" class="inline-flex items-center px-4 py-2 bg-green-600 text-white rounded-md text-sm font-medium hover:bg-green-700 transition-colors shadow-sm">
+                                                    View Gallery
+                                                </button>
+                                                <button @click="gphotosState = 'idle'" class="inline-flex items-center px-4 py-2 bg-white border border-gray-300 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors shadow-sm">
+                                                    Import More
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </template>
+
+                                <!-- Error state -->
+                                <template v-else-if="gphotosState === 'error'">
+                                    <div class="max-w-lg mx-auto">
+                                        <div class="p-6 bg-red-50 rounded-xl border border-red-200">
+                                            <svg class="mx-auto h-10 w-10 text-red-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                            <h3 class="text-lg font-semibold text-red-900 mb-2">Import Failed</h3>
+                                            <p class="text-sm text-red-700 mb-4">{{ gphotosError }}</p>
+                                            <button @click="gphotosState = 'idle'" class="inline-flex items-center px-4 py-2 bg-white border border-red-300 rounded-md text-sm font-medium text-red-700 hover:bg-red-50 transition-colors shadow-sm">
+                                                Try Again
                                             </button>
                                         </div>
                                     </div>
-                                </div>
+                                </template>
                             </div>
                             
                             <!-- Google Drive -->
@@ -470,6 +546,10 @@
                 
                 // State Data
                 const galleryPhotos = ref([]);
+                const galleryTotal = ref(0);
+                const galleryHasMore = ref(false);
+                const galleryLoadingMore = ref(false);
+                const GALLERY_PAGE_SIZE = 50;
                 const searchResults = ref([]);
                 const searchQuery = ref('');
                 const lastSearchQuery = ref('');
@@ -492,8 +572,12 @@
                     gallery: true, search: false, faces: true, duplicates: true, dashboard: true, gphotos: false
                 });
                 const dragover = ref(false);
-                const gphotosAuthUrl = ref('');
+                const gphotosState = ref('idle');  // idle | picking | importing | done | error
                 const gphotosSessionId = ref('');
+                const gphotosPickerUri = ref('');
+                const gphotosImportResult = ref({});
+                const gphotosError = ref('');
+                let gphotosPoller = null;
                 
                 let searchTimeout = null;
                 let pollInterval = null;
@@ -522,17 +606,35 @@
                 };
 
                 // Views Loaders
-                async function loadGallery() {
-                    loading.value.gallery = true;
+                async function loadGallery(reset = true) {
+                    if (reset) {
+                        loading.value.gallery = true;
+                        galleryPhotos.value = [];
+                    }
+                    const offset = reset ? 0 : galleryPhotos.value.length;
                     try {
-                        galleryPhotos.value = await fetchApi('/photos');
+                        const data = await fetchApi(`/photos?offset=${offset}&limit=${GALLERY_PAGE_SIZE}`);
+                        if (reset) {
+                            galleryPhotos.value = data.photos;
+                        } else {
+                            galleryPhotos.value.push(...data.photos);
+                        }
+                        galleryTotal.value = data.total;
+                        galleryHasMore.value = galleryPhotos.value.length < data.total;
                         apiConnected.value = true;
                     } catch (e) {
                         console.error(e);
                         apiConnected.value = false;
                     } finally {
                         loading.value.gallery = false;
+                        galleryLoadingMore.value = false;
                     }
+                }
+
+                async function loadMoreGallery() {
+                    if (galleryLoadingMore.value || !galleryHasMore.value) return;
+                    galleryLoadingMore.value = true;
+                    await loadGallery(false);
                 }
 
                 function debouncedSearch() {
@@ -578,7 +680,7 @@
                     try {
                         const limit = 50;
                         const offset = (dupPage.value - 1) * limit;
-                        const data = await fetchApi(`/api/duplicates?limit=${limit}&offset=${offset}`);
+                        const data = await fetchApi(`/duplicates?limit=${limit}&offset=${offset}`);
                         duplicates.value = data.duplicates || [];
                         dupStats.value.count = data.count || 0;
                     } catch (e) {
@@ -595,15 +697,15 @@
 
                 async function loadDashboard() {
                     try {
-                        const [pCount, cData, dData] = await Promise.all([
-                            fetchApi('/api/photos/count').catch(()=>({count:0})),
+                        const [pData, cData, dData] = await Promise.all([
+                            fetchApi('/photos?limit=1').catch(()=>({total:0})),
                             fetchApi('/faces/clusters').catch(()=>({cluster_count:0, clusters:[]})),
-                            fetchApi('/api/duplicates?limit=1').catch(()=>({count:0}))
+                            fetchApi('/duplicates?limit=1').catch(()=>({count:0}))
                         ]);
                         
                         const totalFaces = (cData.clusters || []).reduce((sum, c) => sum + (c.face_count || 0), 0);
                         dashStats.value = {
-                            photos: pCount.count || 0,
+                            photos: pData.total || 0,
                             clusters: cData.cluster_count || 0,
                             faces: totalFaces,
                             dups: dData.count || 0
@@ -676,31 +778,56 @@
                 // Google Photos 
                 async function startGPhotosSession() {
                     loading.value.gphotos = true;
+                    gphotosError.value = '';
                     try {
                         const res = await fetchApi('/google-photos/session', { method: 'POST' });
                         gphotosSessionId.value = res.session_id;
-                        gphotosAuthUrl.value = res.auth_url;
+                        gphotosPickerUri.value = res.picker_uri;
+
+                        // Open the picker in a new tab
+                        window.open(res.picker_uri, '_blank');
+
+                        // Move to "picking" state and start import
+                        gphotosState.value = 'picking';
+                        triggerGPhotosImport();
                     } catch (e) {
-                        alert("Google Photos integration needs OAuth credentials configured on the backend.");
+                        console.error('Google Photos session error:', e);
+                        gphotosError.value = 'Could not create a Google Photos session. Make sure OAuth credentials are configured on the backend.';
+                        gphotosState.value = 'error';
                     } finally {
                         loading.value.gphotos = false;
                     }
                 }
-                
+
                 async function triggerGPhotosImport() {
-                    if(!gphotosSessionId.value) return;
+                    if (!gphotosSessionId.value) return;
+                    // The backend's /import endpoint polls the picker session itself
+                    // (up to 5 min) until the user finishes picking, then downloads
+                    // and queues ingestion. So we just call it and wait.
+                    gphotosState.value = gphotosState.value === 'idle' ? 'importing' : gphotosState.value;
                     try {
-                        await fetchApi(`/google-photos/session/${gphotosSessionId.value}/import`, { method: 'POST' });
-                        alert("Import job started! Check the dashboard/gallery for progress.");
+                        // This call blocks server-side until picking completes
+                        gphotosState.value = 'importing';
+                        const result = await fetchApi(`/google-photos/session/${gphotosSessionId.value}/import`, { method: 'POST' });
+                        gphotosImportResult.value = result;
+                        gphotosState.value = 'done';
                         pollJobs();
                     } catch (e) {
-                        alert("Failed to start import. Make sure you completed the OAuth flow.");
+                        console.error('Google Photos import error:', e);
+                        gphotosError.value = 'Import failed. This could mean the picker timed out (5 min), or the backend couldn\'t download the selected photos.';
+                        gphotosState.value = 'error';
                     }
+                }
+
+                function cancelGPhotosSession() {
+                    gphotosState.value = 'idle';
+                    gphotosSessionId.value = '';
+                    gphotosPickerUri.value = '';
                 }
 
                 // Watcher to load data when view changes
                 watch(currentView, (newVal) => {
-                    if (newVal === 'gallery' && galleryPhotos.value.length === 0) loadGallery();
+                    if (newVal === 'gallery') loadGallery();  // always reload to show latest
                     if (newVal === 'faces' && faceClusters.value.length === 0) loadFaces();
                     if (newVal === 'duplicates') loadDuplicates(); // always reload duplicates for page sync
                     if (newVal === 'dashboard') loadDashboard();
@@ -714,17 +841,37 @@
                     loadGallery();
                     pollJobs();
                     pollInterval = setInterval(pollJobs, 5000); // Poll every 5s for job status
+
+                    // Infinite scroll via IntersectionObserver
+                    const scrollContainer = document.getElementById('scroll-container');
+                    const observer = new IntersectionObserver((entries) => {
+                        if (entries[0].isIntersecting && galleryHasMore.value && !galleryLoadingMore.value) {
+                            loadMoreGallery();
+                        }
+                    }, { root: scrollContainer, rootMargin: '400px' });
+
+                    // Watch for the sentinel element
+                    const checkSentinel = () => {
+                        const sentinel = document.querySelector('[data-gallery-sentinel]');
+                        if (sentinel) observer.observe(sentinel);
+                    };
+                    // Re-check when gallery view changes
+                    watch(() => [currentView.value, galleryHasMore.value], () => {
+                        Vue.nextTick(checkSentinel);
+                    });
                 });
 
                 return {
                     currentView, navItems, apiConnected, loading,
-                    galleryPhotos, searchResults, searchQuery, lastSearchQuery, debouncedSearch, searchPhotos,
+                    galleryPhotos, galleryTotal, galleryHasMore, galleryLoadingMore, loadMoreGallery,
+                    searchResults, searchQuery, lastSearchQuery, debouncedSearch, searchPhotos,
                     faceClusters, facesStats, triggerFacesJob,
                     duplicates, dupStats, dupPage, changeDupPage, triggerDedupJob,
                     dashStats, allJobs, activeJobs, isJobRunning,
                     uploadTab, dragover, handleDrop, handleFileSelect, uploadQueue,
-                    gphotosAuthUrl, startGPhotosSession, triggerGPhotosImport,
-                    imgUrl, handleImgError, lightbox, openLightbox
+                    gphotosState, gphotosPickerUri, gphotosImportResult, gphotosError,
+                    startGPhotosSession, triggerGPhotosImport, cancelGPhotosSession,
+                    imgUrl, handleImgError, lightbox, openLightbox, loadGallery
                 }
             }
         }).mount('#app')
