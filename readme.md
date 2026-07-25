@@ -1,6 +1,6 @@
 # AI Photo Management Platform
 
-An AI-powered photo management platform that connects to Google Photos and local storage, identifies duplicate and near-duplicate images, categorizes photos, groups people using facial recognition, and supports natural language search — built with FastAPI, PostgreSQL + pgvector, and OpenCLIP.
+An AI-powered photo management platform that connects to Google Photos and local storage, identifies duplicate and near-duplicate images, categorizes photos, groups people using facial recognition, and supports natural language search — built with FastAPI, PostgreSQL + pgvector, OpenCLIP, and Tesseract OCR.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for system architecture diagrams and detailed design decisions.
 
@@ -10,7 +10,9 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for system architecture diagrams and de
 - **Natural language search** over your photo library using CLIP embeddings
 - **Duplicate detection** — both exact/near-exact (perceptual hash) and semantic near-duplicates (CLIP similarity)
 - **Face grouping** — detects and clusters faces across your library, similar to modern photo apps
-- **Zero-shot categorization** into: documents, prescriptions, receipts, people, travel, pets, food, screenshots, vehicles, nature, and other
+- **Two-path categorization**:
+  - Text-heavy images (documents, prescriptions, receipts) classified via **OCR + keyword matching**
+  - Visual images (people, pets, travel, food, nature, vehicles, screenshots) classified via **CLIP zero-shot classification**
 - **Bulk ingestion** with batched CLIP inference for large libraries
 - **Resumable long-running jobs** (dedup, face clustering) with live progress tracking
 - Fully containerized with Docker
@@ -20,6 +22,7 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for system architecture diagrams and de
 - **API**: FastAPI
 - **Database**: PostgreSQL + pgvector (vector similarity search)
 - **Embeddings**: OpenCLIP (`ViT-B-32-quickgelu`, OpenAI weights)
+- **Document classification**: Tesseract OCR (`pytesseract`) + keyword matching
 - **Face detection/clustering**: `face_recognition` (HOG) + DBSCAN / incremental nearest-neighbor matching
 - **Storage**: Pluggable backend — local filesystem or Google Drive
 - **Photo import**: Google Photos Picker API
@@ -31,6 +34,7 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for system architecture diagrams and de
 
 - Python 3.11+ (3.13 tested)
 - Docker Desktop
+- Tesseract OCR (see below)
 - A Google Cloud project (for Google Drive storage and/or Google Photos import)
 
 ### 1. Clone and install dependencies
@@ -51,13 +55,28 @@ pip install -r requirements.txt
 pip install face_recognition --no-deps
 ```
 
-### 2. Start PostgreSQL (with pgvector)
+### 2. Install Tesseract OCR
+
+The `pytesseract` Python package is only a wrapper — it requires the actual Tesseract OCR **binary** to be installed separately.
+
+- **Windows**: Download and run the installer from https://github.com/UB-Mannheim/tesseract/wiki (default install path `C:\Program Files\Tesseract-OCR\tesseract.exe`, which the code already looks for)
+- **macOS**: `brew install tesseract`
+- **Linux**: `sudo apt-get install tesseract-ocr`
+- **Docker**: already handled in the `Dockerfile` (installs `tesseract-ocr` via `apt-get`)
+
+Verify it's working:
+```python
+import pytesseract
+print(pytesseract.get_tesseract_version())
+```
+
+### 3. Start PostgreSQL (with pgvector)
 
 ```bash
 docker compose up -d db
 ```
 
-### 3. Google Cloud setup (for Drive storage and/or Google Photos import)
+### 4. Google Cloud setup (for Drive storage and/or Google Photos import)
 
 1. Create a project in [Google Cloud Console](https://console.cloud.google.com)
 2. Enable the **Google Drive API** (for local-style storage) and/or the **Google Photos Picker API** (for importing from a user's Google Photos library)
@@ -67,7 +86,7 @@ docker compose up -d db
 
 **Note on Google Photos:** As of April 2025, Google restricted the Photos Library API — apps can no longer list a user's entire existing library without a formal Google verification process. This project uses the **Photos Picker API** instead: the user explicitly selects photos through Google's own picker UI each time, and the app receives access only to those selected items. See `ARCHITECTURE.md` for details.
 
-### 4. Run the API
+### 5. Run the API
 
 ```bash
 python -m uvicorn api.main:app --reload
@@ -75,7 +94,7 @@ python -m uvicorn api.main:app --reload
 
 Visit `http://127.0.0.1:8000/docs` for interactive API documentation (Swagger UI).
 
-### 5. Run with Docker (full stack)
+### 6. Run with Docker (full stack)
 
 ```bash
 docker compose up -d
@@ -98,7 +117,7 @@ This builds and runs both the API and database containers together. Your project
 | GET | `/duplicates` | List detected duplicate pairs, with viewable image URLs |
 | POST | `/faces/cluster` | Run face detection/clustering (resumable, progress-tracked) |
 | GET | `/faces/clusters` | List face clusters, with viewable image URLs |
-| POST | `/photos/{id}/categorize` | Categorize a photo (zero-shot CLIP) |
+| POST | `/photos/{id}/categorize` | Categorize a photo (OCR document path, falls back to CLIP visual path) |
 | GET | `/photos/{id}/categories` | Get a photo's assigned categories |
 | GET | `/jobs/status` | Poll live progress of `/dedup` or `/faces/cluster` while running |
 | POST | `/google-photos/session` | Start a Google Photos picker session |
@@ -120,19 +139,29 @@ python -m pytest tests/ -v
 
 15+ tests covering embedding, deduplication, face detection/clustering, categorization, and storage.
 
+## Categorization: why two separate classification paths
+
+Initial testing revealed that CLIP-only categorization was unreliable for the assignment's required text-based categories (`documents`, `prescriptions`, `receipts`). For example, searching "prescription" against a test library returned photos of people wearing **eyeglasses** — CLIP was matching on the strongest semantic association in its training data ("prescription" → "prescription glasses"), not on document content, because CLIP judges images by visual similarity and has no ability to read text. Prescriptions, receipts, and generic documents all look like "text on a light background" to it, so it cannot reliably tell them apart.
+
+**Fix:** `pipeline/document_classifier.py` runs OCR (Tesseract) on the image first. If the image is text-heavy enough (a minimum word-count threshold), it classifies based on **keyword matching** against the extracted text (e.g. "rx", "dosage", "pharmacy" → prescriptions; "total", "subtotal", "tax" → receipts; otherwise → documents). Only if the image doesn't have enough text does it fall back to the original CLIP visual classification path for the remaining categories (people, pets, travel, food, nature, vehicles, screenshots, other).
+
+**Validated against the Tobacco3482 dataset** (scanned business/legal documents — memos, letters, forms) after the fix: photos correctly classified as `documents` based on actual OCR'd content, rather than random CLIP guesses.
+
 ## Known Limitations
 
 - **Face detection** uses the default HOG model, which is less reliable on angled/profile faces. CNN model (`model="cnn"`) available as a slower, more accurate alternative — not yet wired up as a config option.
 - **No GPU acceleration** — CLIP and face embedding inference run on CPU.
 - **Google Drive backend** has no automated retry/error handling beyond what the Drive API raises natively.
 - **Google Photos** integration only provides access to photos the user actively selects in each picker session — there's no way to browse/search a user's full library from within the app before they've picked (a platform-level restriction, not a limitation of this implementation — see `ARCHITECTURE.md`).
+- **Document classification is keyword-based, not ML-based.** This is transparent and debuggable, and works well for clearly-worded documents, but can misclassify text that doesn't contain expected keywords (e.g. a receipt photographed at an angle with OCR errors, or a prescription in a format that doesn't use common terms). A production system would likely combine this with a trained text classifier for better recall.
+- **OCR quality depends on image quality.** Blurry, low-resolution, or heavily skewed photos of documents will produce poor OCR text, which can cause the word-count threshold to fail and incorrectly fall through to the CLIP visual path.
 - **Face clustering accuracy degrades on large libraries.** The incremental clustering approach (matching each new face against only its single nearest known face, rather than re-running full batch clustering) is vulnerable to error chaining: if two visually similar but distinct people are ever matched together early in a run, subsequent faces that are loosely close to either person can keep joining the same cluster, producing an oversized, incorrect "supercluster" over a long run. This was observed directly when testing against the full 13,233-image LFW dataset — one cluster grew to 1,056 faces (verified visually to include clearly different people).
   - **Why this trade-off was made:** batch DBSCAN re-clustering is accurate but doesn't scale — it would require re-processing the entire face history on every call. The incremental approach trades some accuracy for the ability to only process new photos, necessary at real library scale.
   - **How this would be fixed in production:** cap cluster size and periodically re-validate/split oversized clusters against their centroid, use a stricter tolerance combined with a minimum-confidence threshold before merging, or run a periodic batch DBSCAN reconciliation pass in the background.
 
 ## Scaling Considerations (tested up to 113,268 images)
 
-The system was stress-tested well beyond toy-scale demos, combining the full LFW dataset (13,233 images), STL-10's unlabeled split (100,000 images), and a small Google Photos import (12 images) — **113,268 total images**, clearing the assignment's 100,000-image requirement with real, tested data.
+The system was stress-tested well beyond toy-scale demos, combining the full LFW dataset (13,233 images), STL-10's unlabeled split (100,000 images), a small Google Photos import (12 images), and the Tobacco3482 document dataset — **113,268+ total images**, clearing the assignment's 100,000-image requirement with real, tested data.
 
 ### What scaled well
 
@@ -156,5 +185,6 @@ This was discovered through direct experience: the initial `/dedup` and `/faces/
 - [ ] Background job queue (Celery + Redis) so `/dedup` and `/faces/cluster` don't block the request thread at all
 - [ ] CNN face detection toggle for improved accuracy
 - [ ] Periodic batch reconciliation pass to correct face clustering drift
+- [ ] ML-based document classifier to complement/replace keyword matching
 - [ ] Web UI for browsing/search (currently Swagger UI serves as the interactive interface)
 - [ ] Postman collection
