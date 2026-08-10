@@ -183,7 +183,7 @@ Initial testing revealed that CLIP-only categorization was unreliable for the as
 
 ## Scaling Considerations (tested up to 116,000+ images)
 
-The system was stress-tested well beyond toy-scale demos, combining the full LFW dataset (13,233 images), STL-10's unlabeled split (100,000 images), the Tobacco3482 document dataset, and Google Photos imports — **116,000+ total images**, clearing the assignment's 100,000-image requirement with real, tested data.
+The system was stress-tested well beyond toy-scale demos, combining the full LFW dataset (13,233 images), STL-10's unlabeled split (100,000 images), the Tobacco3482 document dataset, and Google Photos imports — **116,000+ total images**.
 
 ### What scaled well
 
