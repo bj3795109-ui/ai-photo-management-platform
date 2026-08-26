@@ -9,7 +9,11 @@ class LocalStorageBackend(StorageBackend):
         os.makedirs(self.base_dir, exist_ok=True)
 
     def upload(self, local_file_path: str, dest_name: str) -> str:
+        # Normalise to forward slashes so paths stored in the DB are
+        # always Linux-compatible (the Docker containers run Linux).
+        dest_name = dest_name.replace("\\", "/")
         dest_path = os.path.join(self.base_dir, dest_name)
+        dest_path = dest_path.replace("\\", "/")
         shutil.copy2(local_file_path, dest_path)
         return dest_path
 

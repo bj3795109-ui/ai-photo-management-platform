@@ -28,7 +28,9 @@ tobacco3482_images/
 .DS_Store
 Thumbs.db
  
-# Logs
+# Logs & runtime data
 *.log
 Log
+celerybeat-schedule*
+tobacco3482_sample/
  

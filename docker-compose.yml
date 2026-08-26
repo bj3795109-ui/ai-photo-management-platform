@@ -18,21 +18,76 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: photo_platform_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   api:
     build: .
     container_name: photo_platform_api
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/photo_platform
+      REDIS_URL: redis://redis:6379/0
       STORAGE_BACKEND: local
       LOCAL_STORAGE_DIR: /data/photos
+      FACE_DETECTION_MODEL: hog
     ports:
       - "8000:8000"
     volumes:
       - ./:/app
       - photo_data:/data/photos
+
+  worker:
+    build: .
+    container_name: photo_platform_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/photo_platform
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_DIR: /data/photos
+      FACE_DETECTION_MODEL: hog
+    volumes:
+      - ./:/app
+      - photo_data:/data/photos
+    # /dedup and /faces/cluster are CPU-bound (CLIP/face embeddings, DBSCAN) --
+    # concurrency beyond a couple of workers just contends for the same CPU on
+    # a single machine. Raise this once running on real multi-core infra.
+    command: celery -A celery_app worker --loglevel=info --concurrency=2
+
+  beat:
+    build: .
+    container_name: photo_platform_beat
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/photo_platform
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./:/app
+    # Schedules the periodic face-cluster reconciliation pass (see
+    # celery_app.py's beat_schedule / RECONCILE_INTERVAL_SECONDS). Only
+    # triggers tasks -- the actual work still runs on the `worker` service.
+    command: celery -A celery_app beat --loglevel=info
 
 volumes:
   pgdata:

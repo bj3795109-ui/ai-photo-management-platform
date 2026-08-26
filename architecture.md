@@ -7,7 +7,7 @@ The AI Photo Management Platform ingests photos from local storage or Google Dri
 ```mermaid
 graph TB
     subgraph Client
-        User[User / Evaluator]
+        User[User / Evaluator / Web UI]
     end
 
     subgraph API["FastAPI Layer (api/main.py)"]
@@ -15,16 +15,21 @@ graph TB
         Search["GET /search"]
         Dedup["POST /dedup"]
         FaceCluster["POST /faces/cluster"]
-        Categorize["POST /photos/{id}/categorize"]
-        Duplicates["GET /duplicates"]
-        Clusters["GET /faces/clusters"]
+        Reconcile["POST /faces/reconcile"]
+        JobStatusRoute["GET /jobs/status"]
+    end
+
+    subgraph Queue["Background Queue (Celery + Redis)"]
+        Redis[("Redis Broker")]
+        Beat["Celery Beat Scheduler<br/>(Periodic Reconciliation)"]
+        Worker["Celery Worker (tasks.py / celery_app.py)"]
     end
 
     subgraph Pipeline["Processing Pipeline (pipeline/)"]
+        Jobs["jobs.py<br/>Long-running jobs (dedup, faces, reconcile)"]
         Embedding["embedding.py<br/>CLIP image/text embeddings, pHash"]
-        DedupLogic["dedup.py<br/>Duplicate detection"]
-        Faces["faces.py<br/>Face detection, clustering, matching"]
-        Categorize["categorize.py<br/>Zero-shot classification"]
+        Faces["faces.py<br/>Face detection, clustering, reconciliation"]
+        Categorize["categorize.py<br/>OCR + CLIP classification"]
         IngestLogic["ingest.py<br/>Orchestrates upload → embed → store"]
         SearchLogic["search.py<br/>Text query → pgvector similarity"]
     end
@@ -37,40 +42,38 @@ graph TB
 
     subgraph DB["Database (db/)"]
         Postgres[("PostgreSQL + pgvector")]
-        PhotoTable["photos<br/>(id, embedding, source_path, ...)"]
-        FaceTable["faces<br/>(embedding, cluster_id)"]
+        PhotoTable["photos"]
+        FaceTable["faces"]
         ClusterTable["face_clusters"]
         DupTable["duplicates"]
-        CategoryTable["categories"]
+        JobTable["job_status"]
     end
 
     User -->|HTTP requests| API
     Ingest --> IngestLogic
     Search --> SearchLogic
-    Dedup --> DedupLogic
-    FaceCluster --> Faces
-    Categorize --> Categorize
+    Dedup -->|dispatches task| Redis
+    FaceCluster -->|dispatches task| Redis
+    Reconcile -->|dispatches task| Redis
+    Beat -->|triggers schedule| Redis
+    Redis --> Worker
+    Worker --> Jobs
+    Jobs --> Faces
+    Jobs --> Embedding
+    Jobs -->|updates progress| JobTable
+    JobStatusRoute -->|polls status| JobTable
 
     IngestLogic --> Embedding
     IngestLogic --> StorageBase
-    DedupLogic --> Embedding
-    Faces --> Embedding
 
     StorageBase --> Local
     StorageBase --> Drive
 
     Embedding -->|writes| PhotoTable
-    DedupLogic -->|writes| DupTable
-    Faces -->|writes| FaceTable
-    Faces -->|writes| ClusterTable
-    Categorize -->|writes| CategoryTable
+    Jobs -->|writes| DupTable
+    Jobs -->|writes| FaceTable
+    Jobs -->|writes| ClusterTable
     SearchLogic -->|pgvector query| PhotoTable
-
-    PhotoTable --> Postgres
-    FaceTable --> Postgres
-    ClusterTable --> Postgres
-    DupTable --> Postgres
-    CategoryTable --> Postgres
 ```
 
 ## Data Flow: Ingestion
@@ -135,17 +138,29 @@ sequenceDiagram
 **Why:** Full batch re-clustering on every run doesn't scale — at 13,000+ images it would mean re-processing the entire face history every time a single new photo is added. Incremental matching only processes new/unprocessed photos.
 **Trade-off (discovered during testing):** this approach is vulnerable to error chaining — since each new face is matched only against its single nearest neighbor rather than re-validated against the whole cluster, visually similar-but-distinct people can occasionally merge into the same cluster over a long run, and the error compounds. This was observed directly: testing against the full 13,233-image LFW dataset produced one cluster of 1,056 faces that, on visual inspection, contained multiple different people. This is documented as a known limitation in the README, along with a proposed fix (periodic batch reconciliation, or stricter similarity thresholds with confidence-based merging) rather than silently accepting the incorrect result.
 
-### 6. FastAPI Swagger UI as the interface (no custom frontend)
-**Decision:** Expose all functionality via a FastAPI backend with its auto-generated Swagger UI (`/docs`) as the interactive interface, rather than building a separate frontend application.
-**Why:** Given the assignment's focus on the AI/ML pipeline and backend architecture, a custom frontend was judged out of scope relative to the time available. Swagger UI provides a genuinely functional, testable interface for every endpoint (including direct image viewing via `/photos/{id}/image`) without additional frontend engineering.
-**Trade-off:** Not as polished as a purpose-built UI, and not suitable for non-technical end users. A frontend is listed as a roadmap item.
+### 6. Vue 3 SPA + Tailwind CSS Web UI & FastAPI Backend
+**Decision:** Provide a full Vue 3 single-file web application (`frontend/index.html`) loaded via CDN with Tailwind CSS styling, alongside FastAPI's auto-generated Swagger UI (`/docs`).
+**Why:** Gives users a responsive, modern web interface with infinite-scroll gallery browsing, real-time background job progress tracking, natural language search, face cluster review, side-by-side duplicate comparison, and drag-and-drop/Google Photos uploads.
+**Architecture:** CORS middleware is enabled on the FastAPI core (`allow_origins=["*"]`), allowing the frontend to run either standalone (e.g. `python -m http.server 8080`), directly via `file://`, or served directly by the API server via `serve_ui.py`.
 
-### 7. Google Photos integration via the Picker API (not the Library API)
+### 7. Cross-Platform Path Normalization (Windows & Linux Containers)
+**Decision:** Standardize all file storage references (`storage_ref`) and source paths (`source_path`) to forward slashes (`/`) across the entire backend, with a dedicated database migration script (`scripts/fix_paths.py`).
+**Why:** Photos ingested from Windows hosts initially stored backslash separators (`\`). When running inside Linux Docker containers, backslashes are literal filename characters rather than directory separators, breaking `os.path.exists()` checks and causing 404 errors. Standardizing on forward slashes ensures 100% compatibility across host operating systems and Linux container environments.
+
+### 8. Google Photos integration via the Picker API (not the Library API)
 **Decision:** Implemented Google Photos import using the **Photos Picker API** rather than the (now-restricted) Photos Library API.
 **Why:** As of April 2025, Google restricted the Library API so that new/unverified apps can no longer list a user's entire existing photo library (`photoslibrary.readonly` requires a formal Google security verification process that takes weeks and is intended for production apps with real users). The Picker API is Google's current recommended path for third-party apps: the user explicitly selects photos through Google's own picker UI (`https://photos.google.com/integration/picker/...`), and the app receives temporary, scoped access only to those selected items.
 **Flow:** `POST /google-photos/session` creates a session and returns a `picker_uri`; the user opens it, selects photos, and the app polls until selection is complete; `POST /google-photos/session/{id}/import` then downloads each selected item and feeds it through the existing `ingest_photo()` pipeline — reusing the same OAuth credentials (extended with the `photospicker.mediaitems.readonly` scope) and storage/embedding logic already built for Drive.
 **Verified:** tested live against a real Google account — 12 real photos selected via the picker, downloaded, and successfully ingested with embeddings into the running database.
 **Trade-off:** unlike full library listing, the Picker API only provides access to photos the user actively selects in each session — there's no way to browse/search the user's full library from within the app before they've picked anything already exists (or `Google Drive` storage, which does support full listing since Drive's more permissive API model wasn't affected by the same restriction).
+
+### 9. Asynchronous Task Queue with Celery & Redis
+**Decision:** Offload long-running, CPU-bound operations (`/dedup`, `/faces/cluster`, and `/faces/reconcile`) to dedicated Celery background workers (`worker` service) backed by Redis as a message broker and result backend. Celery Beat (`beat` service) schedules periodic face-cluster reconciliation passes.
+**Why:** Running CPU-intensive machine learning algorithms (face embedding calculations, DBSCAN clustering, vector distance comparisons over 116k+ photos) directly on FastAPI HTTP request threads resulted in request timeouts, blocked server loops, and dropped progress if a request connection dropped.
+**Architecture:**
+- **Celery Worker (`tasks.py` / `pipeline/jobs.py`)**: Asynchronously executes deduplication and face clustering jobs off the HTTP thread.
+- **Celery Beat (`celery_app.py`)**: Automatically triggers `tasks.reconcile_face_clusters` every 6 hours (configurable via `RECONCILE_INTERVAL_SECONDS`).
+- **Live Progress Tracking (`job_status` table)**: Workers update a persistent `JobStatus` record during batched processing, which the frontend polls via `GET /jobs/status` to render real-time progress bars.
 
 ## Scale Testing Summary
 

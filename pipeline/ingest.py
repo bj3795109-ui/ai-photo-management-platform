@@ -13,7 +13,7 @@ def ingest_photo(local_file_path: str, dest_name: str) -> str:
     db = SessionLocal()
     try:
         photo = Photo(
-            source_path=local_file_path,
+            source_path=local_file_path.replace("\\", "/"),
             storage_backend="local",
             storage_ref=storage_ref,
             hash=phash,

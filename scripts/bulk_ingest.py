@@ -55,7 +55,7 @@ def bulk_ingest(folder_path: str):
             phash = compute_phash(path)
 
             photo = Photo(
-                source_path=path,
+                source_path=path.replace("\\", "/"),
                 storage_backend="local",
                 storage_ref=storage_ref,
                 hash=phash,

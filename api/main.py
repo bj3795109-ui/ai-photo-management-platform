@@ -4,17 +4,19 @@ import tempfile
 from datetime import datetime, timezone
 
 import numpy as np
+from celery.result import AsyncResult
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, UploadFile, File
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from celery_app import celery_app
 from db.database import get_db, engine, Base
 from db.models import Photo, Duplicate, FaceCluster, Face, Category, JobStatus
 from pipeline.ingest import ingest_photo
 from pipeline.search import search_photos as search_photos_fn
-from pipeline.faces import detect_faces
 from pipeline.categorize import categorize_image
 from auth import get_drive_credentials
+from tasks import run_dedup_task, run_face_clustering_task, reconcile_face_clusters_task
 from sources.google_photos_picker import (
     create_picker_session,
     poll_session_until_ready,
@@ -22,9 +24,18 @@ from sources.google_photos_picker import (
     download_picked_item,
     delete_session,
 )
+from fastapi.middleware.cors import CORSMiddleware
 from storage.local_backend import LocalStorageBackend
 
 app = FastAPI(title="AI Photo Management Platform")
+
+# Allow the frontend (which may run on a different origin) to talk to the API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 Base.metadata.create_all(bind=engine)
 
@@ -99,9 +110,11 @@ def get_photo_image(photo_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Photo not found")
     if photo.storage_backend != "local":
         raise HTTPException(status_code=400, detail="Only local storage supported for direct serving")
-    if not os.path.exists(photo.storage_ref):
+    # Normalise any stale Windows-style backslash paths so they resolve on Linux
+    file_path = photo.storage_ref.replace("\\", "/")
+    if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Image file not found on disk")
-    return FileResponse(photo.storage_ref)
+    return FileResponse(file_path)
 
 
 @app.delete("/photos/{photo_id}")
@@ -124,25 +137,10 @@ def search(q: str, top_k: int = 5):
     return {"query": q, "results": results}
 
 
-def _update_job_status(db: Session, job_name: str, processed: int, total: int, status: str, extra_info: str = None):
-    """Upserts a row in job_status. Commits immediately so it's visible to other
-    requests polling GET /jobs/status while this job is still running."""
-    job = db.query(JobStatus).filter(JobStatus.job_name == job_name).first()
-    if job is None:
-        job = JobStatus(job_name=job_name)
-        db.add(job)
-
-    job.processed = processed
-    job.total = total
-    job.status = status
-    job.extra_info = extra_info
-    job.updated_at = datetime.now(timezone.utc)
-    db.commit()
-
-
 @app.get("/jobs/status")
 def get_job_status(db: Session = Depends(get_db)):
-    """Poll this while /dedup or /faces/cluster is running to see live progress."""
+    """Poll this while /dedup, /faces/cluster, or /faces/reconcile is running
+    to see live progress (written by the Celery worker as it runs)."""
     jobs = db.query(JobStatus).all()
     return {
         job.job_name: {
@@ -156,62 +154,32 @@ def get_job_status(db: Session = Depends(get_db)):
     }
 
 
+@app.get("/jobs/{task_id}")
+def get_task_status(task_id: str):
+    """Look up a specific Celery task by the id returned from /dedup,
+    /faces/cluster, or /faces/reconcile. Complements /jobs/status (which is
+    keyed by job name and reflects the latest run of each job type)."""
+    result = AsyncResult(task_id, app=celery_app)
+    return {
+        "task_id": task_id,
+        "state": result.state,
+        "result": result.result if result.ready() else None,
+    }
+
+
 @app.post("/dedup")
-def run_dedup(db: Session = Depends(get_db)):
+def run_dedup():
     """Finds near-duplicate photos using pgvector's index.
 
-    Resumable: only processes photos where dedup_processed is False, so if
-    interrupted and restarted, it picks up where it left off instead of
-    re-scanning everything from the start. Commits every 2,000 photos (not
-    just once at the end), and writes progress to job_status (poll
-    GET /jobs/status from a separate request to see it live).
+    Runs on a Celery worker, not the request thread, so this returns
+    immediately with a task id. Resumable: only processes photos where
+    dedup_processed is False, so if the worker is interrupted and restarted,
+    it picks up where it left off instead of re-scanning everything. Commits
+    every 2,000 photos and writes live progress to job_status -- poll
+    GET /jobs/status or GET /jobs/{task_id} to watch it run.
     """
-    photos = (
-        db.query(Photo.id, Photo.embedding)
-        .filter(Photo.embedding.isnot(None))
-        .filter(Photo.dedup_processed == False)
-        .all()
-    )
-    total = len(photos)
-
-    if total == 0:
-        _update_job_status(db, "dedup", 0, 0, "done", "No new photos to process")
-        return {"message": "No new photos to process", "duplicates_found": 0}
-
-    existing_pairs = set(
-        (d.photo_id, d.duplicate_of_id)
-        for d in db.query(Duplicate.photo_id, Duplicate.duplicate_of_id).all()
-    )
-
-    saved_count = 0
-    _update_job_status(db, "dedup", 0, total, "running", "0 duplicates found so far")
-
-    for i, (photo_id, embedding) in enumerate(photos):
-        similar = (
-            db.query(Photo.id)
-            .filter(Photo.id != photo_id)
-            .filter(Photo.embedding.cosine_distance(embedding) < 0.05)
-            .limit(5)
-            .all()
-        )
-        for (match_id,) in similar:
-            pair = (photo_id, match_id)
-            if pair not in existing_pairs:
-                db.add(Duplicate(photo_id=photo_id, duplicate_of_id=match_id, similarity_score=1.0))
-                existing_pairs.add(pair)
-                saved_count += 1
-
-        db.query(Photo).filter(Photo.id == photo_id).update({"dedup_processed": True})
-
-        if (i + 1) % 2000 == 0:
-            db.commit()
-            _update_job_status(db, "dedup", i + 1, total, "running", f"{saved_count} duplicates found so far")
-            print(f"[dedup] Processed {i + 1}/{total} photos, {saved_count} duplicates found so far")
-
-    db.commit()
-    _update_job_status(db, "dedup", total, total, "done", f"{saved_count} duplicates found total")
-    print(f"[dedup] Done. Processed {total} photos, {saved_count} duplicates found total")
-    return {"duplicates_found": saved_count, "photos_processed": total}
+    task = run_dedup_task.delay()
+    return {"status": "queued", "task_id": task.id}
 
 
 @app.get("/duplicates")
@@ -233,62 +201,41 @@ def list_duplicates(db: Session = Depends(get_db), limit: int = 50, offset: int 
 
 
 @app.post("/faces/cluster")
-def run_face_clustering(db: Session = Depends(get_db)):
+def run_face_clustering(model: str | None = None):
     """Detects and clusters faces in all unprocessed photos.
 
-    Commits every 500 photos processed (not just once at the end) so an
-    interruption doesn't lose all progress. Progress is written to job_status
-    (poll GET /jobs/status from a separate request to see it live) and printed
-    to server logs.
+    Runs on a Celery worker; returns immediately with a task id. Uses fast
+    incremental matching (each new face vs. its single nearest known face),
+    which is why POST /faces/reconcile exists as a periodic correction pass --
+    see that endpoint's docstring for why incremental matching alone isn't
+    enough at scale.
+
+    model: "hog" (default, set via FACE_DETECTION_MODEL env var) or "cnn" for
+    better accuracy on angled/profile faces at significantly higher compute
+    cost. Pass as a query param to override the default for this run.
     """
-    unprocessed_photos = db.query(Photo).filter(Photo.faces_processed == False).all()
-    total = len(unprocessed_photos)
+    task = run_face_clustering_task.delay(model)
+    return {"status": "queued", "task_id": task.id, "model": model or os.getenv("FACE_DETECTION_MODEL", "hog")}
 
-    if not unprocessed_photos:
-        _update_job_status(db, "faces_cluster", 0, 0, "done", "No new photos to process")
-        return {"message": "No new photos to process", "faces_found": 0}
 
-    existing_faces = db.query(Face).all()
-    known_encodings = [np.array(f.embedding, dtype=np.float32) for f in existing_faces]
-    known_cluster_ids = [f.cluster_id for f in existing_faces]
+@app.post("/faces/reconcile")
+def run_face_reconciliation():
+    """Manually triggers the periodic face-cluster reconciliation pass (it
+    also runs automatically every RECONCILE_INTERVAL_SECONDS via Celery beat --
+    see celery_app.py).
 
-    faces_found = 0
-    _update_job_status(db, "faces_cluster", 0, total, "running", "0 faces found so far")
-
-    for i, photo in enumerate(unprocessed_photos):
-        encodings = detect_faces(photo.source_path)
-        for enc in encodings:
-            matched_cluster_id = None
-
-            if known_encodings:
-                distances = [np.linalg.norm(np.array(k) - enc) for k in known_encodings]
-                min_dist = min(distances)
-                if min_dist <= 0.6:
-                    matched_cluster_id = known_cluster_ids[distances.index(min_dist)]
-
-            if matched_cluster_id is None:
-                cluster = FaceCluster(label=None)
-                db.add(cluster)
-                db.flush()
-                matched_cluster_id = cluster.id
-
-            face = Face(photo_id=photo.id, bbox={}, embedding=enc.tolist(), cluster_id=matched_cluster_id)
-            db.add(face)
-            known_encodings.append(enc)
-            known_cluster_ids.append(matched_cluster_id)
-            faces_found += 1
-
-        photo.faces_processed = True
-
-        if (i + 1) % 500 == 0:
-            db.commit()
-            _update_job_status(db, "faces_cluster", i + 1, total, "running", f"{faces_found} faces found so far")
-            print(f"[faces/cluster] Processed {i + 1}/{total} photos, {faces_found} faces found so far")
-
-    db.commit()
-    _update_job_status(db, "faces_cluster", total, total, "done", f"{faces_found} faces found total")
-    print(f"[faces/cluster] Done. Processed {total} photos, {faces_found} faces found total")
-    return {"faces_found": faces_found, "photos_processed": total}
+    Incremental clustering in /faces/cluster only ever compares a new face to
+    its single nearest known face; it never re-checks a cluster once faces
+    have joined it. If two visually similar-but-different people get merged
+    early, everything loosely close to either of them can keep joining that
+    same cluster with no signal anything went wrong -- on the full LFW stress
+    test this produced one 1,056-face cluster containing clearly different
+    people. This job re-clusters every cluster above a size threshold from
+    scratch with batch DBSCAN at a stricter tolerance and splits it if the
+    incremental result doesn't hold up.
+    """
+    task = reconcile_face_clusters_task.delay()
+    return {"status": "queued", "task_id": task.id}
 
 
 @app.get("/faces/clusters")
